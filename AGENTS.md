@@ -26,6 +26,7 @@ listing every related doc as mandatory.
 This project keeps institutional knowledge in `docs/project_notes/`.
 
 - `bugs.md`: resolved or recurring bugs with causes and fixes
+- `current_task.md`: current active execution/acceptance task only, overwritten when the next task starts
 - `decisions.md`: durable architectural or workflow decisions
 - `key_facts.md`: non-secret stable project facts plus a short last-verified environment section
 - `issues.md`: current-state summary plus chronological work log
@@ -36,7 +37,10 @@ This project keeps institutional knowledge in `docs/project_notes/`.
 - Before proposing architecture or workflow changes, check `docs/project_notes/decisions.md`.
 - Before debugging an error, search `docs/project_notes/bugs.md`.
 - Before assuming project configuration, check `docs/project_notes/key_facts.md`.
+- After the workspace rulebook has been synced from `zone-memory`, treat local docs as the default source of truth for future runs.
+- Do not reread the `zone-memory` skill on every task; reread it only when intentionally resyncing workflow rules or when local docs appear stale or contradictory.
 - Update `docs/project_notes/issues.md` with meaningful work progress and completion notes.
+- Keep detailed task cards out of long-lived logs. Use `docs/project_notes/current_task.md` for the current task card and overwrite it for the next task.
 - Do not read `docs/project_notes/issues.md` end to end by default. Read the `Current Summary` first, then only the latest log block for the current task ID.
 - When resolving a reusable bug, add or update `docs/project_notes/bugs.md`.
 - When making or changing a durable decision, add or update `docs/project_notes/decisions.md`.
@@ -66,7 +70,7 @@ Every execution task gets a short Acceptance Contract. A separate Acceptance pas
 Execution evidence should default to a write-back flow:
 
 - `执行区` writes its evidence report into the latest matching task block in `docs/project_notes/issues.md`.
-- `验收区` reads the Acceptance Contract, the `Current Summary`, the latest matching task block in `docs/project_notes/issues.md`, and the current diff.
+- `验收区` reads the Acceptance Contract from `docs/project_notes/current_task.md`, the `Current Summary`, the latest matching task block in `docs/project_notes/issues.md`, and the current diff.
 - Do not require the user to manually relay the execution evidence between zones unless the task explicitly calls for it.
 
 Zone thread defaults:
@@ -74,7 +78,7 @@ Zone thread defaults:
 - Use the exact Chinese names `规划区`, `执行区`, `验收区`, `维护区`.
 - Do not create English-named duplicate zones unless explicitly requested.
 - Newly created zone threads should start with a minimal acknowledgement or next-step status.
-- Keep paste-ready task blocks outside `issues.md`; use `issues.md` for summaries, decisions, and execution evidence.
+- Keep paste-ready task blocks outside `issues.md`; use `current_task.md` for the active task and use `issues.md` for summaries, decisions, and execution evidence.
 
 ### Polymarket Strategy Rules
 
@@ -90,3 +94,10 @@ Zone thread defaults:
 - Do not add abstractions, services, factories, dependencies, or broad refactors without a current concrete need.
 - Do not revert user changes or unrelated workspace changes.
 - Do not merge, rebase, reset, push, or delete branches without explicit approval.
+
+### Planning Verification Rules
+
+- For small `规划区` doc-only updates, do not run `git diff --check` by default.
+- Use `git status --short` or a targeted file read when the goal is only to confirm touched files.
+- Run `git diff --check` only for larger Markdown rewrites, complex fenced code blocks, `.gitignore` edits, or when whitespace/conflict-marker risk is concrete.
+- Do not run full `git diff` as a routine planning check; use targeted diffs only when exact changed lines are needed.

@@ -10,9 +10,13 @@
 - Do not split work so finely that `执行区` loses momentum; prefer medium-sized coherent slices with clear gates.
 - Do not read `issues.md` end to end by default; read `Current Summary` plus the latest log block for the current task ID.
 - Use `/private/tmp` handoffs only for complex, risky, ambiguous, multi-stage, or failed-acceptance work.
+- Use `docs/project_notes/current_task.md` as the only persistent current-task surface; overwrite it when the next task starts.
+- Treat old task-card files as archives. Do not append detailed task cards there by default.
 - Every execution task gets a short Acceptance Contract.
 - A separate Acceptance pass is required only for risky, user-critical, or explicitly requested work.
 - Every execution task card must be specific enough that `执行区` does not need to invent strategy, product behavior, runtime choice, storage design, or unresolved phase gates.
+- Once local workflow docs have been synced from `zone-memory`, prefer those local docs over rereading the skill on normal tasks.
+- Reopen `zone-memory` only for explicit workflow resyncs or when local rules appear stale, incomplete, or contradictory.
 
 ## Planning
 
@@ -37,14 +41,24 @@ Preferred output:
 - when sending work from `规划区` to another zone, keep everything that target zone needs inside one continuous copy block
 - for paired execution and acceptance routing, the default is one copy block for `执行区` and one copy block for `验收区`
 - default to a two-hop flow: `规划区 -> 执行区`, then `规划区 -> 验收区`; execution evidence should be written back into `issues.md` instead of manually relayed by the user
+- write the active task card and acceptance contract to `current_task.md`; do not keep growing historical task-card files
+- when `current_task.md` is the active task surface, the planning reply should not repeat the full task card; end with short copy-ready prompts that tell `执行区` or `验收区` to read `current_task.md` and name the task ID
 - when using a `/private/tmp` handoff, include the absolute handoff path and direct paste targets for the next zone
 - keep `issues.md` minimal: current recommended next task plus short evidence/decision summaries, not full paste-ready prompts
+
+Verification defaults:
+
+- For small doc-only planning updates, do not run `git diff --check` by default.
+- Use `git status --short` or targeted file reads when the goal is only to confirm which files changed.
+- Run `git diff --check` only after larger Markdown rewrites, complex fenced code blocks, `.gitignore` edits, or concrete whitespace/conflict-marker risk.
+- Do not run full `git diff` as a routine planning check; use targeted diffs only when exact changed lines are needed.
 
 ## Execution
 
 Responsibilities:
 
 - read the relevant docs, task card, and memory files
+- read `current_task.md` for the assigned task; do not scan historical task-card archives unless the current task explicitly says to
 - implement the smallest working change
 - reuse existing patterns
 - run focused verification
@@ -71,6 +85,7 @@ Responsibilities:
 - verify acceptance criteria, safety boundaries, and regression risk
 - decide pass or fail
 - use the Acceptance Contract plus execution evidence plus current diff as the default input set
+- read the current Acceptance Contract from `current_task.md`
 - read execution evidence from `docs/project_notes/issues.md` by task ID when available instead of requiring manual paste-through
 
 Boundaries:
@@ -192,13 +207,16 @@ Acceptance review task:
 ## Project Note File Rules
 
 - `bugs.md`: only resolved or recurring bugs; record issue, root cause, fix, and prevention.
+- `current_task.md`: the current active task card and/or acceptance task only; overwrite it for the next task instead of preserving detailed historical prompts.
 - `decisions.md`: durable ADRs and workflow decisions; update an existing ADR when a decision changes instead of piling up contradictions.
 - `key_facts.md`: stable non-secret facts first; drift-prone environment facts stay short and dated.
 - `issues.md`: live summary first, chronological log below; read Current Summary plus the latest relevant task block by default.
+- `issues.md`: execution evidence may use the standard detailed template or an equivalent compact `Changed / Verified / Manual / Scope skipped` shape when that is clearer for the current task.
 - `zone_operating_model.md`: zone responsibilities, boundaries, and standard cards; keep it short enough to reread quickly.
 - `docs/product_consensus/...`: confirmed behavior, locked non-goals, and unresolved product decisions that execution must not silently decide.
 - `docs/architecture.md`: required module boundaries and dependency direction; keep the first version concrete.
 - `docs/implementation-plan.md`: phase deliverables, verification, and gates so later slices do not start early.
+- Historical task-card documents are archives only; keep future history in `issues.md` as concise summaries of task intent, changed files, evidence, and blockers.
 
 ## Anti-Patterns
 
@@ -206,6 +224,7 @@ Acceptance review task:
 - Do not mix stable facts with progress logs in `key_facts.md`.
 - Do not force a full Acceptance pass on trivial slices.
 - Do not repeat stable rules in every task card.
+- Do not keep appending full task cards to a growing archive when `current_task.md` is enough.
 - Do not make execution invent runtime, storage, strategy rules, or phase gates.
 - Do not send acceptance the full execution prompt when the contract plus evidence is enough.
 - Do not add more zones, files, or roles before there is a real need.

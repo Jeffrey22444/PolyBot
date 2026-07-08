@@ -2,7 +2,9 @@
 
 ## Status
 
-This document is the current source of truth for strategy behavior.
+This document is the original v1 strategy baseline. The current
+human-readable strategy logic chain lives in
+`docs/product_consensus/polymarket_paper_trader_logic_chain.md`.
 
 - Build paper trading first.
 - Do not build live trading in the current phase set.
