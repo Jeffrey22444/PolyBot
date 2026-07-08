@@ -15,10 +15,15 @@ from polybot.market_data import CaptureRecord, capture_btc_reference, write_json
 from polybot.market_discovery import GAMMA_EVENTS_URL
 from polybot.market_discovery import discover_session, fetch_json, select_session
 from polybot.open_price import enrich_session_config
-from polybot.paper_runner import parse_datetime, parse_entry_remain_seconds, run_session_once
+from polybot.paper_runner import parse_datetime, run_session_once
 from polybot.resolution_ingestion import extract_market, ingest_metadata
 from polybot.run_artifacts import build_run_artifacts, read_json, write_json
+from polybot.signal import Signal
 from polybot.supervisor_results import batch_close
+from polybot.trade_ledger import DEFAULT_LEDGER_PATH, record_result, rows as ledger_rows, upsert_trade
+
+
+BEIJING_TZ = timezone(timedelta(hours=8), "CST")
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -31,6 +36,164 @@ def records_to_jsonl(path: Path, records: list[CaptureRecord]) -> None:
     path.write_text("", encoding="utf-8")
     if records:
         write_jsonl(path, records)
+
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "strategy": {
+        "market_type": "btc_up_down_15m",
+        "observe_start_remaining_seconds": 300,
+        "move_threshold_pct": 0.05,
+        "max_entries_per_market": 1,
+    },
+    "paper": {"stake": 9.0, "initial_bankroll": 1000.0, "ledger_path": str(DEFAULT_LEDGER_PATH)},
+    "marketability": {"p_hat_filter_enabled": True, "p_hat": 0.55},
+    "discovery": {
+        "search_query": "bitcoin up down 15m",
+        "mode": "next",
+        "max_pages": 10,
+        "limit": 100,
+        "lookahead_minutes": 90,
+    },
+    "timing": {
+        "max_wait_to_open_seconds": 900.0,
+        "max_wait_to_observation_seconds": 900.0,
+        "max_open_price_delay_seconds": 5.0,
+    },
+    "capture": {
+        "open_price_seconds": 8.0,
+        "capture_limit": 5,
+        "observation_tick_seconds": 1.0,
+        "runner_seconds": 8.0,
+    },
+    "runtime": {
+        "max_sessions": 96,
+        "max_runtime_seconds": 90000.0,
+        "retry_limit": 1,
+        "retry_backoff_seconds": 5.0,
+        "heartbeat_interval_seconds": 30.0,
+    },
+    "operator_output": {"enabled": True, "format": "text"},
+}
+
+
+CONFIG_ARG_MAP = {
+    "search_query": ("discovery", "search_query"),
+    "mode": ("discovery", "mode"),
+    "max_pages": ("discovery", "max_pages"),
+    "limit": ("discovery", "limit"),
+    "lookahead_minutes": ("discovery", "lookahead_minutes"),
+    "max_wait_to_open_seconds": ("timing", "max_wait_to_open_seconds"),
+    "max_wait_to_observation_seconds": ("timing", "max_wait_to_observation_seconds"),
+    "max_open_price_delay_seconds": ("timing", "max_open_price_delay_seconds"),
+    "capture_seconds": ("capture", "open_price_seconds"),
+    "capture_limit": ("capture", "capture_limit"),
+    "observation_tick_seconds": ("capture", "observation_tick_seconds"),
+    "runner_seconds": ("capture", "runner_seconds"),
+    "max_sessions": ("runtime", "max_sessions"),
+    "max_runtime_seconds": ("runtime", "max_runtime_seconds"),
+    "retry_limit": ("runtime", "retry_limit"),
+    "retry_backoff_seconds": ("runtime", "retry_backoff_seconds"),
+    "heartbeat_interval_seconds": ("runtime", "heartbeat_interval_seconds"),
+    "paper_stake": ("paper", "stake"),
+    "initial_bankroll": ("paper", "initial_bankroll"),
+    "ledger_path": ("paper", "ledger_path"),
+    "p_hat": ("marketability", "p_hat"),
+    "p_hat_filter_enabled": ("marketability", "p_hat_filter_enabled"),
+    "move_threshold_pct": ("strategy", "move_threshold_pct"),
+    "observe_start_remaining_seconds": ("strategy", "observe_start_remaining_seconds"),
+    "operator_output_enabled": ("operator_output", "enabled"),
+}
+
+
+def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return merge_config(DEFAULT_CONFIG, {})
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise SystemExit("PyYAML is required for --config; install requirements.txt") from exc
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise SystemExit("config must be a YAML mapping")
+    return merge_config(DEFAULT_CONFIG, data)
+
+
+def apply_config(args: argparse.Namespace) -> argparse.Namespace:
+    config = load_config(args.config)
+    for arg_name, path in CONFIG_ARG_MAP.items():
+        value = getattr(args, arg_name)
+        if value is not None:
+            section, key = path
+            config[section][key] = str(value) if isinstance(value, Path) else value
+
+    validate_config(config)
+    args.effective_config = config
+    args.search_query = config["discovery"]["search_query"]
+    args.mode = config["discovery"]["mode"]
+    args.max_pages = int(config["discovery"]["max_pages"])
+    args.limit = int(config["discovery"]["limit"])
+    args.lookahead_minutes = int(config["discovery"]["lookahead_minutes"])
+    args.max_wait_to_open_seconds = float(config["timing"]["max_wait_to_open_seconds"])
+    args.max_wait_to_observation_seconds = float(config["timing"]["max_wait_to_observation_seconds"])
+    args.max_open_price_delay_seconds = float(config["timing"]["max_open_price_delay_seconds"])
+    args.capture_seconds = float(config["capture"]["open_price_seconds"])
+    args.capture_limit = int(config["capture"]["capture_limit"])
+    args.observation_tick_seconds = float(config["capture"]["observation_tick_seconds"])
+    args.runner_seconds = float(config["capture"]["runner_seconds"])
+    args.max_sessions = int(config["runtime"]["max_sessions"])
+    args.max_runtime_seconds = float(config["runtime"]["max_runtime_seconds"])
+    args.retry_limit = int(config["runtime"]["retry_limit"])
+    args.retry_backoff_seconds = float(config["runtime"]["retry_backoff_seconds"])
+    args.heartbeat_interval_seconds = float(config["runtime"]["heartbeat_interval_seconds"])
+    args.paper_stake = float(config["paper"]["stake"])
+    args.initial_bankroll = float(config["paper"]["initial_bankroll"])
+    args.ledger_path = Path(config["paper"]["ledger_path"])
+    args.p_hat = None if config["marketability"]["p_hat"] is None else float(config["marketability"]["p_hat"])
+    args.p_hat_filter_enabled = bool(config["marketability"]["p_hat_filter_enabled"])
+    args.move_threshold_pct = float(config["strategy"]["move_threshold_pct"])
+    args.observe_start_remaining_seconds = int(config["strategy"]["observe_start_remaining_seconds"])
+    args.max_entries_per_market = int(config["strategy"]["max_entries_per_market"])
+    args.operator_output_enabled = bool(config["operator_output"]["enabled"])
+    args.config_snapshot = config
+    return args
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    checks = [
+        (float(config["paper"]["stake"]) > 0, "paper.stake must be > 0"),
+        (float(config["paper"]["initial_bankroll"]) > 0, "paper.initial_bankroll must be > 0"),
+        (float(config["strategy"]["move_threshold_pct"]) >= 0, "strategy.move_threshold_pct must be >= 0"),
+        (int(config["strategy"]["observe_start_remaining_seconds"]) > 0, "strategy.observe_start_remaining_seconds must be > 0"),
+        (int(config["strategy"]["max_entries_per_market"]) == 1, "strategy.max_entries_per_market must be 1"),
+        (float(config["timing"]["max_wait_to_open_seconds"]) >= 0, "timing.max_wait_to_open_seconds must be >= 0"),
+        (float(config["timing"]["max_wait_to_observation_seconds"]) >= 0, "timing.max_wait_to_observation_seconds must be >= 0"),
+        (float(config["timing"]["max_open_price_delay_seconds"]) >= 0, "timing.max_open_price_delay_seconds must be >= 0"),
+        (float(config["capture"]["open_price_seconds"]) >= 0, "capture.open_price_seconds must be >= 0"),
+        (int(config["capture"]["capture_limit"]) >= 0, "capture.capture_limit must be >= 0"),
+        (float(config["capture"]["observation_tick_seconds"]) >= 0, "capture.observation_tick_seconds must be >= 0"),
+        (float(config["capture"]["runner_seconds"]) >= 0, "capture.runner_seconds must be >= 0"),
+        (int(config["runtime"]["max_sessions"]) > 0, "runtime.max_sessions must be > 0"),
+        (float(config["runtime"]["max_runtime_seconds"]) >= 0, "runtime.max_runtime_seconds must be >= 0"),
+        (int(config["runtime"]["retry_limit"]) >= 0, "runtime.retry_limit must be >= 0"),
+        (float(config["runtime"]["retry_backoff_seconds"]) >= 0, "runtime.retry_backoff_seconds must be >= 0"),
+        (float(config["runtime"]["heartbeat_interval_seconds"]) >= 0, "runtime.heartbeat_interval_seconds must be >= 0"),
+    ]
+    if config["marketability"]["p_hat_filter_enabled"]:
+        p_hat = config["marketability"]["p_hat"]
+        checks.append((p_hat is not None and 0 <= float(p_hat) <= 1, "marketability.p_hat must be between 0 and 1 when filter is enabled"))
+    for ok, message in checks:
+        if not ok:
+            raise SystemExit(message)
 
 
 def load_public_payload(args: argparse.Namespace) -> tuple[Any, str | None, str]:
@@ -162,45 +325,109 @@ async def wait_to_open(session: dict[str, Any], max_wait_seconds: float) -> dict
     return {**step, "status": "no_wait_needed"}
 
 
-async def wait_to_entry(
+async def wait_to_observation(
     session: dict[str, Any],
-    entry_remain_seconds: tuple[int, ...],
+    observe_start_remaining_seconds: int,
     max_wait_seconds: float,
-    tolerance_seconds: float,
 ) -> dict[str, Any]:
     end = parse_datetime(session["market_end_time"])
+    observation_at = end - timedelta(seconds=observe_start_remaining_seconds)
     now = datetime.now(timezone.utc)
-    candidates = sorted((end - timedelta(seconds=seconds), seconds) for seconds in entry_remain_seconds)
+    wait_seconds = max((observation_at - now).total_seconds(), 0.0)
     step = {
-        "step": "wait_to_entry",
+        "step": "wait_to_observation",
         "local_timestamp": now.isoformat(),
-        "candidate_entry_timestamps": [timestamp.isoformat() for timestamp, _ in candidates],
+        "observation_timestamp": observation_at.isoformat(),
+        "observe_start_remaining_seconds": observe_start_remaining_seconds,
         "max_wait_seconds": max_wait_seconds,
-        "tolerance_seconds": tolerance_seconds,
-    }
-    usable = [(timestamp, seconds) for timestamp, seconds in candidates if (timestamp + timedelta(seconds=tolerance_seconds)) >= now]
-    if not usable:
-        return {**step, "status": "skipped", "reason": "entry_window_missed"}
-
-    entry_at, remain_seconds = usable[0]
-    wait_seconds = max((entry_at - now).total_seconds(), 0.0)
-    selected = {
-        **step,
-        "selected_entry_timestamp": entry_at.isoformat(),
-        "selected_entry_remain_seconds": remain_seconds,
         "wait_seconds": wait_seconds,
     }
+    if now > end:
+        return {**step, "status": "skipped", "reason": "observation_window_missed"}
     if wait_seconds > max_wait_seconds:
-        return {**selected, "status": "skipped", "reason": "wait_to_entry_budget_exceeded"}
-
+        return {**step, "status": "skipped", "reason": "wait_to_observation_budget_exceeded"}
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
-    wake = datetime.now(timezone.utc)
-    lateness = (wake - entry_at).total_seconds()
-    finished = {**selected, "wake_timestamp": wake.isoformat(), "lateness_seconds": lateness}
-    if lateness > tolerance_seconds:
-        return {**finished, "status": "skipped", "reason": "entry_window_missed"}
-    return {**finished, "status": "success" if wait_seconds > 0 else "no_wait_needed"}
+        return {**step, "status": "success"}
+    return {**step, "status": "no_wait_needed"}
+
+
+def operator_print(args: argparse.Namespace, message: str) -> None:
+    if args.operator_output_enabled:
+        print(f"[{beijing_time_text()}] {message}", flush=True)
+
+
+def fmt(value: Any) -> str:
+    return "None" if value is None else str(value)
+
+
+def fmt_money(value: Any) -> str:
+    try:
+        return f"{float(value):+.2f}"
+    except (TypeError, ValueError):
+        return "None"
+
+
+def fmt_pct(value: Any) -> str:
+    try:
+        return f"{float(value):.4f}%"
+    except (TypeError, ValueError):
+        return "None"
+
+
+def beijing_time_text(value: datetime | None = None) -> str:
+    dt = value or datetime.now(timezone.utc)
+    return dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def operator_time(value: Any) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, datetime):
+        return beijing_time_text(value)
+    if isinstance(value, str):
+        try:
+            return beijing_time_text(parse_datetime(value))
+        except ValueError:
+            return value
+    return str(value)
+
+
+def market_slug(session: dict[str, Any]) -> str:
+    return str(session.get("market_slug") or session.get("market_id") or "unknown")
+
+
+def ledger_row(args: argparse.Namespace, market_id: str) -> dict[str, Any]:
+    return next((row for row in ledger_rows(args.ledger_path) if row.get("market_id") == market_id), {})
+
+
+def emit_market_results(args: argparse.Namespace, summary: dict[str, Any]) -> None:
+    for item in summary.get("per_session", []):
+        session = item.get("session") or {}
+        market_id = str(session.get("market_id") or "")
+        if not market_id:
+            continue
+        row = ledger_row(args, market_id)
+        if item.get("status") == "closed":
+            paper_pnl = (item.get("summary", {}).get("tradable_signal", {}).get("paper_pnl") or [])
+            first = paper_pnl[0] if paper_pnl else {}
+            pnl = first.get("paper_pnl", 0)
+            result = "WIN" if pnl > 0 else "LOSS" if paper_pnl else "SKIPPED"
+            stats = record_result(args.ledger_path, market_id, result, args.initial_bankroll, winning_side=item.get("winning_side"), paper_pnl=pnl)
+            operator_print(
+                args,
+                f"[RESULT] market_id={market_id} side={fmt(first.get('signal') or row.get('side'))} winning_side={fmt(item.get('winning_side'))} result={result} pnl={fmt_money(pnl)} equity={fmt_money(stats['equity_after'])} return={fmt_pct(stats['return_pct'])} win_rate={fmt_pct(stats['win_rate'])} settled={stats['settled_count']}",
+            )
+            continue
+        reason = item.get("skip_reason")
+        result = "PENDING" if reason in ("missing_resolution", "not_closed") else "SKIPPED"
+        if reason == "observation_window_no_signal":
+            result = "NO_TRADE"
+        stats = record_result(args.ledger_path, market_id, result, args.initial_bankroll, skip_reason=reason)
+        operator_print(
+            args,
+            f"[RESULT] market_id={market_id} side={fmt(row.get('side'))} winning_side=None result={result} pnl=+0.00 equity={fmt_money(stats['equity_after'])} return={fmt_pct(stats['return_pct'])} reason={fmt(reason)}",
+        )
 
 
 async def process_session(
@@ -213,6 +440,18 @@ async def process_session(
 ) -> dict[str, Any]:
     meta = session_meta(session)
     session_report: dict[str, Any] = {"session_index": index, "session": meta, "steps": [], "runner_output": None, "status": "attempted"}
+    market_id = str(session.get("market_id") or "")
+    if market_id:
+        upsert_trade(
+            args.ledger_path,
+            market_id=market_id,
+            market_start_time=session.get("market_start_time"),
+            market_end_time=session.get("market_end_time"),
+            threshold_pct=args.move_threshold_pct,
+            observe_start_remaining_seconds=args.observe_start_remaining_seconds,
+            stake=args.paper_stake,
+            result="PENDING",
+        )
 
     wait_step = await wait_to_open(session, min(args.max_wait_to_open_seconds, max(0.0, remaining_runtime_seconds)))
     session_report["steps"].append(wait_step)
@@ -222,6 +461,9 @@ async def process_session(
         session_report["steps"].append({"step": "open_price", "status": "skipped", "reason": f"not_reached_after_{reason}"})
         append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "skip_reason": reason})
         session_report.update({"status": "skipped", "skip_reason": reason})
+        if market_id:
+            record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
+        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
         return session_report
 
     btc_records: list[CaptureRecord] = []
@@ -238,75 +480,141 @@ async def process_session(
         session_report["steps"].append({"step": "open_price", "status": "skipped", "reason": reason})
         append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "skip_reason": reason})
         session_report.update({"status": "skipped", "skip_reason": reason})
+        if market_id:
+            record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
+        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
         return session_report
 
     enriched_session = enriched["selection"]
+    if market_id:
+        upsert_trade(
+            args.ledger_path,
+            market_id=market_id,
+            open_price=enriched_session.get("open_price"),
+            open_price_source=enriched_session.get("open_price_source"),
+        )
     session_report["steps"].append({"step": "open_price", "status": "captured", "open_price": enriched_session["open_price"], "open_price_timestamp": enriched_session["open_price_timestamp"]})
     runner_output = source_dir / f"runner_{index}.jsonl"
     runner_output.write_text("", encoding="utf-8")
     session_report["runner_output"] = str(runner_output)
 
-    entry_remain_seconds = parse_entry_remain_seconds(args.entry_remain_seconds)
-    entry_step = await wait_to_entry(
+    observation_step = await wait_to_observation(
         enriched_session,
-        entry_remain_seconds,
-        min(args.max_wait_to_entry_seconds, max(0.0, remaining_runtime_seconds)),
-        args.entry_window_tolerance_seconds,
+        args.observe_start_remaining_seconds,
+        min(args.max_wait_to_observation_seconds, max(0.0, remaining_runtime_seconds)),
     )
-    session_report["steps"].append(entry_step)
-    if entry_step["status"] == "skipped":
-        reason = entry_step["reason"]
+    session_report["steps"].append(observation_step)
+    if observation_step["status"] == "skipped":
+        reason = observation_step["reason"]
         append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "runner_output": str(runner_output), "skip_reason": reason})
         session_report["steps"].append({"step": "paper_runner", "status": "skipped", "runner_output": str(runner_output), "reason": reason})
         session_report.update({"status": "skipped", "skip_reason": reason})
+        if market_id:
+            record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
+        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
         return session_report
-
-    runner_now = parse_datetime(entry_step["selected_entry_timestamp"])
+    end = parse_datetime(enriched_session["market_end_time"])
+    observation_checks = 0
+    last_signal_record = None
     try:
-        await run_session_once(
-            session=enriched_session,
-            open_price=float(enriched_session["open_price"]),
-            stake=args.paper_stake,
-            output=runner_output,
-            seconds=args.runner_seconds,
-            caller_supplied_p_hat=args.p_hat,
-            now=runner_now,
-            entry_remain_seconds=entry_remain_seconds,
-            move_threshold_pct=args.move_threshold_pct,
-        )
-        append_jsonl(supervisor_jsonl, {"record_type": "session_runner_finished", "session": meta, "runner_output": str(runner_output)})
-        session_report["steps"].append({"step": "paper_runner", "status": "completed", "runner_output": str(runner_output)})
-        session_report["status"] = "completed"
+        while datetime.now(timezone.utc) <= end:
+            runner_now = datetime.now(timezone.utc)
+            result = await run_session_once(
+                session=enriched_session,
+                open_price=float(enriched_session["open_price"]),
+                stake=args.paper_stake,
+                output=runner_output,
+                seconds=args.runner_seconds,
+                caller_supplied_p_hat=args.p_hat,
+                now=runner_now,
+                observe_start_remaining_seconds=args.observe_start_remaining_seconds,
+                move_threshold_pct=args.move_threshold_pct,
+                p_hat_filter_enabled=args.p_hat_filter_enabled,
+                btc_seconds=args.observation_tick_seconds,
+                market_seconds=args.runner_seconds,
+            )
+            observation_checks += 1
+            signal_record = result.get("signal_record")
+            if signal_record is not None:
+                last_signal_record = signal_record
+            if result["status"] == "no_signal":
+                await asyncio.sleep(max(args.observation_tick_seconds, 0.001))
+                continue
+            if result["status"] == "skipped" and signal_record is None:
+                await asyncio.sleep(max(args.observation_tick_seconds, 0.001))
+                continue
+
+            decision = result.get("decision")
+            if signal_record is not None and market_id:
+                upsert_trade(
+                    args.ledger_path,
+                    market_id=market_id,
+                    decision_time=signal_record.now.isoformat(),
+                    decision_remaining_seconds=signal_record.remaining_seconds,
+                    decision_move_pct=signal_record.ret_pct,
+                    signal=signal_record.signal.value,
+                    side=signal_record.signal.value if signal_record.signal in (Signal.UP, Signal.DOWN) else None,
+                    stake=getattr(decision, "stake", None),
+                    entry_avg_ask=getattr(decision, "executable_avg_ask", None),
+                    shares=getattr(decision, "shares", None),
+                    result="PENDING" if result["status"] == "paper_opened" else "SKIPPED",
+                    skip_reason=result.get("reason"),
+                )
+            if result["status"] == "paper_opened":
+                operator_print(
+                    args,
+                    f"[TRADE] market_id={market_id} side={decision.signal.value} stake={decision.stake} ask={decision.executable_avg_ask} shares={decision.shares:.4f} move={fmt_pct(signal_record.ret_pct if signal_record else None)} rem={fmt(signal_record.remaining_seconds if signal_record else None)}",
+                )
+            else:
+                if market_id:
+                    record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=result.get("reason"))
+                operator_print(args, f"[SKIP] market_id={market_id} reason={result.get('reason')} move={fmt_pct(signal_record.ret_pct if signal_record else None)} rem={fmt(signal_record.remaining_seconds if signal_record else None)}")
+            append_jsonl(supervisor_jsonl, {"record_type": "session_runner_finished", "session": meta, "runner_output": str(runner_output)})
+            session_report["steps"].append({"step": "paper_runner", "status": "completed", "runner_output": str(runner_output), "observation_checks": observation_checks})
+            session_report["status"] = "completed"
+            return session_report
+
+        reason = "observation_window_no_signal"
+        if market_id:
+            upsert_trade(
+                args.ledger_path,
+                market_id=market_id,
+                decision_time=last_signal_record.now.isoformat() if last_signal_record else None,
+                decision_remaining_seconds=last_signal_record.remaining_seconds if last_signal_record else None,
+                decision_move_pct=last_signal_record.ret_pct if last_signal_record else None,
+                signal=last_signal_record.signal.value if last_signal_record else None,
+                result="NO_TRADE",
+                skip_reason=reason,
+            )
+            record_result(args.ledger_path, market_id, "NO_TRADE", args.initial_bankroll, skip_reason=reason)
+        operator_print(args, f"[SKIP] market_id={market_id} reason={reason} move={fmt_pct(last_signal_record.ret_pct if last_signal_record else None)} rem={fmt(last_signal_record.remaining_seconds if last_signal_record else None)}")
+        append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "runner_output": str(runner_output), "skip_reason": reason})
+        session_report["steps"].append({"step": "paper_runner", "status": "skipped", "runner_output": str(runner_output), "reason": reason, "observation_checks": observation_checks})
+        session_report.update({"status": "skipped", "skip_reason": reason})
     except Exception as exc:
         reason = f"runner_blocked={type(exc).__name__}: {exc}"
         append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "runner_output": str(runner_output), "skip_reason": reason})
         session_report["steps"].append({"step": "paper_runner", "status": "blocker", "reason": reason})
         session_report.update({"status": "blocker", "skip_reason": reason})
+        if market_id:
+            record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
+        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
     return session_report
 
 
 async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = args.run_dir or Path(tempfile.mkdtemp(prefix="polybot_phase14_e2e_dry_run_")) / "run"
+    operator_print(
+        args,
+        f"[RUN_START] run_dir={run_dir} config={fmt(args.config)} max_sessions={args.max_sessions} stake={args.paper_stake} p_hat_filter={args.p_hat_filter_enabled}",
+    )
     source_dir = run_dir / "_source"
     source_dir.mkdir(parents=True, exist_ok=True)
     supervisor_jsonl = source_dir / "supervisor.jsonl"
     supervisor_jsonl.write_text("", encoding="utf-8")
     report: dict[str, Any] = {
         "task_id": "polybot-paper-phase-14-public-data-e2e-dry-run",
-        "config": {
-            "max_sessions": args.max_sessions,
-            "max_runtime_seconds": args.max_runtime_seconds,
-            "paper_stake": args.paper_stake,
-            "caller_supplied_p_hat": args.p_hat,
-            "move_threshold_pct": args.move_threshold_pct,
-            "entry_remain_seconds": args.entry_remain_seconds,
-            "lookahead_minutes": args.lookahead_minutes,
-            "capture_seconds": args.capture_seconds,
-            "max_wait_to_open_seconds": args.max_wait_to_open_seconds,
-            "max_wait_to_entry_seconds": args.max_wait_to_entry_seconds,
-            "entry_window_tolerance_seconds": args.entry_window_tolerance_seconds,
-            "attempt_public_resolution": args.attempt_public_resolution,
-        },
+        "config": args.config_snapshot,
         "public_data_source": None,
         "steps": [],
         "blockers": [],
@@ -385,6 +693,7 @@ async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
             report["steps"].append({"step": "resolution", "status": "skipped", "reason": "no_completed_runner_output"})
 
     summary = precise_resolution_summary(batch_close(supervisor_jsonl, resolution_result["resolutions"]), resolution_result["resolution_skips"])
+    emit_market_results(args, summary)
     report["attempted_session_count"] = len(report["sessions"])
     report["processed_session_count"] = sum(1 for session in report["sessions"] if session.get("status") == "completed")
     report["final_stop_reason"] = stop_reason
@@ -455,6 +764,7 @@ def close_existing_run(args: argparse.Namespace) -> dict[str, Any]:
     resolution_result = attempt_public_resolutions(report, source_dir)
     report["steps"].extend(resolution_result["attempts"])
     summary = precise_resolution_summary(batch_close(supervisor_jsonl, resolution_result["resolutions"]), resolution_result["resolution_skips"])
+    emit_market_results(args, summary)
     report["resolution_attempted_count"] = len(resolution_result["attempts"])
     report["sessions_closed"] = summary["sessions_closed"]
     report["sessions_pending_or_skipped"] = summary["sessions_skipped"]
@@ -499,17 +809,46 @@ def self_check() -> Path:
     assert (run_dir / "status.json").exists()
     assert (run_dir / "heartbeat.jsonl").exists()
     assert read_json(run_dir / "dry_run_report.json")["steps"][0]["reason"] == "no_valid_candidate"
+    assert beijing_time_text(datetime(2026, 7, 8, 4, 0, tzinfo=timezone.utc)) == "2026-07-08 12:00:00 CST"
+    assert operator_time("2026-07-08T04:15:00+00:00") == "2026-07-08 12:15:00 CST"
     wait_step = asyncio.run(wait_to_open({"market_start_time": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()}, 0.0))
     assert wait_step["reason"] == "wait_to_open_budget_exceeded"
-    entry_step = asyncio.run(
-        wait_to_entry(
-            {"market_end_time": (datetime.now(timezone.utc) + timedelta(seconds=181)).isoformat()},
-            (180, 240),
-            0.0,
-            2.0,
+    config_root = Path(tempfile.mkdtemp(prefix="polybot_config_self_check_"))
+    config_path = config_root / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "paper:",
+                "  stake: 3",
+                "  initial_bankroll: 500",
+                f"  ledger_path: {config_root / 'config-ledger.sqlite3'}",
+                "marketability:",
+                "  p_hat_filter_enabled: false",
+                "  p_hat: null",
+                "runtime:",
+                "  max_sessions: 2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_args = apply_config(
+        build_parser().parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--paper-stake",
+                "4",
+                "--no-operator-output-enabled",
+            ]
         )
     )
-    assert entry_step["reason"] == "wait_to_entry_budget_exceeded"
+    assert config_args.paper_stake == 4.0
+    assert config_args.initial_bankroll == 500.0
+    assert config_args.ledger_path == config_root / "config-ledger.sqlite3"
+    assert config_args.p_hat_filter_enabled is False
+    assert config_args.p_hat is None
+    assert config_args.max_sessions == 2
 
     multi_payload = [
         {
@@ -556,33 +895,45 @@ def self_check() -> Path:
     multi_root = Path(tempfile.mkdtemp(prefix="polybot_phase19_multi_self_check_"))
     input_json = multi_root / "payload.json"
     input_json.write_text(json.dumps(multi_payload, sort_keys=True) + "\n", encoding="utf-8")
-    multi_args = build_parser().parse_args(
-        [
-            "--input-json",
-            str(input_json),
-            "--mode",
-            "next",
-            "--max-sessions",
-            "2",
-            "--max-runtime-seconds",
-            "5",
-            "--lookahead-minutes",
-            "60",
-            "--max-wait-to-open-seconds",
-            "0",
-            "--heartbeat-interval-seconds",
-            "0",
-            "--now",
-            "2026-07-06T12:05:00+00:00",
-            "--run-dir",
-            str(multi_root / "run"),
-        ]
+    multi_args = apply_config(
+        build_parser().parse_args(
+            [
+                "--input-json",
+                str(input_json),
+                "--mode",
+                "next",
+                "--max-sessions",
+                "2",
+                "--max-runtime-seconds",
+                "5",
+                "--lookahead-minutes",
+                "60",
+                "--max-wait-to-open-seconds",
+                "0",
+                "--max-wait-to-observation-seconds",
+                "0",
+                "--heartbeat-interval-seconds",
+                "0",
+                "--no-operator-output-enabled",
+                "--now",
+                "2026-07-06T12:05:00+00:00",
+                "--run-dir",
+                str(multi_root / "run"),
+                "--ledger-path",
+                str(multi_root / "paper_trades.sqlite3"),
+            ]
+        )
     )
     multi_report = asyncio.run(run_dry_run(multi_args))
     assert multi_report["attempted_session_count"] == 2
     starts = [session["session"]["market_start_time"] for session in multi_report["sessions"]]
     assert starts == sorted(starts)
     assert {session["session"]["market_id"] for session in multi_report["sessions"]} == {"market-next-one", "market-next-two"}
+    ledger = ledger_rows(multi_args.ledger_path)
+    assert len(ledger) == 2
+    assert {row["market_id"] for row in ledger} == {"market-next-one", "market-next-two"}
+    assert {row["result"] for row in ledger} == {"SKIPPED"}
+    assert {row["skip_reason"] for row in ledger} == {"no_post_start_record"}
 
     close_root = Path(tempfile.mkdtemp(prefix="polybot_phase20_resolution_self_check_"))
     close_source = close_root / "run" / "_source"
@@ -624,6 +975,7 @@ def self_check() -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bounded public-data end-to-end paper dry run.")
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--run-id", default="phase14-public-data-dry-run")
     parser.add_argument("--source-url")
@@ -631,26 +983,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-kind", choices=("events", "markets", "both"), default="both")
     parser.add_argument("--tag-id")
     parser.add_argument("--slug")
-    parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--max-pages", type=int, default=3)
-    parser.add_argument("--mode", choices=("current", "next"), default="current")
-    parser.add_argument("--lookahead-minutes", type=int, default=30)
-    parser.add_argument("--max-sessions", type=int, default=1)
-    parser.add_argument("--max-runtime-seconds", type=float, default=30.0)
-    parser.add_argument("--paper-stake", type=float, default=9.0)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--max-pages", type=int)
+    parser.add_argument("--mode", choices=("current", "next"))
+    parser.add_argument("--lookahead-minutes", type=int)
+    parser.add_argument("--max-sessions", type=int)
+    parser.add_argument("--max-runtime-seconds", type=float)
+    parser.add_argument("--paper-stake", type=float)
+    parser.add_argument("--initial-bankroll", type=float)
+    parser.add_argument("--ledger-path", type=Path)
     parser.add_argument("--p-hat", type=float)
-    parser.add_argument("--move-threshold-pct", type=float, default=0.05)
-    parser.add_argument("--entry-remain-seconds", default="180,240")
-    parser.add_argument("--capture-seconds", type=float, default=3.0)
-    parser.add_argument("--capture-limit", type=int, default=3)
-    parser.add_argument("--max-wait-to-open-seconds", type=float, default=0.0)
-    parser.add_argument("--max-wait-to-entry-seconds", type=float, default=0.0)
-    parser.add_argument("--entry-window-tolerance-seconds", type=float, default=2.0)
-    parser.add_argument("--max-open-price-delay-seconds", type=float, default=5.0)
-    parser.add_argument("--runner-seconds", type=float, default=3.0)
-    parser.add_argument("--retry-limit", type=int, default=0)
-    parser.add_argument("--retry-backoff-seconds", type=float, default=0.0)
-    parser.add_argument("--heartbeat-interval-seconds", type=float, default=0.0)
+    parser.add_argument("--p-hat-filter-enabled", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--move-threshold-pct", type=float)
+    parser.add_argument("--observe-start-remaining-seconds", type=int)
+    parser.add_argument("--capture-seconds", type=float)
+    parser.add_argument("--capture-limit", type=int)
+    parser.add_argument("--observation-tick-seconds", type=float)
+    parser.add_argument("--max-wait-to-open-seconds", type=float)
+    parser.add_argument("--max-wait-to-observation-seconds", type=float)
+    parser.add_argument("--max-open-price-delay-seconds", type=float)
+    parser.add_argument("--runner-seconds", type=float)
+    parser.add_argument("--retry-limit", type=int)
+    parser.add_argument("--retry-backoff-seconds", type=float)
+    parser.add_argument("--heartbeat-interval-seconds", type=float)
+    parser.add_argument("--operator-output-enabled", action=argparse.BooleanOptionalAction)
     parser.add_argument("--now")
     parser.add_argument("--input-json", type=Path)
     parser.add_argument("--attempt-public-resolution", action="store_true")
@@ -659,7 +1015,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    args = apply_config(build_parser().parse_args())
     if args.self_check:
         output = self_check()
         print(json.dumps({"self_check": "passed", "run_dir": str(output)}, sort_keys=True))

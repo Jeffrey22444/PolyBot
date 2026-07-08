@@ -15,6 +15,7 @@ GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 GAMMA_PUBLIC_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
 USER_AGENT = "PolyBot public discovery"
+POLYMARKET_OPEN_PRICE_KEYS = ("openPrice", "open_price", "referencePrice", "reference_price", "targetPrice", "target_price")
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class SessionConfig:
     local_timestamp: str
     paper_stake: float | None = None
     caller_supplied_p_hat: float | None = None
+    polymarket_open_price: float | None = None
+    polymarket_open_price_source: str | None = None
 
 
 def utc_now() -> datetime:
@@ -69,6 +72,18 @@ def truthy(value: Any) -> bool:
 
 def falsey(value: Any) -> bool:
     return value is False or (isinstance(value, str) and value.lower() == "false")
+
+
+def polymarket_open_price(market: dict[str, Any]) -> tuple[float | None, str | None]:
+    for key in POLYMARKET_OPEN_PRICE_KEYS:
+        value = market.get(key)
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            return price, key
+    return None, None
 
 
 def extract_markets(payload: Any) -> list[dict[str, Any]]:
@@ -166,6 +181,7 @@ def validate_candidate(market: dict[str, Any]) -> tuple[SessionConfig | None, st
     if not market_id:
         return None, "missing_market_id"
 
+    open_price, open_price_source = polymarket_open_price(market)
     return (
         SessionConfig(
             market_id=market_id,
@@ -180,6 +196,8 @@ def validate_candidate(market: dict[str, Any]) -> tuple[SessionConfig | None, st
             selected_side_labels=labels,
             discovery_source_timestamp=None,
             local_timestamp=utc_now().isoformat(),
+            polymarket_open_price=open_price,
+            polymarket_open_price_source=open_price_source,
         ),
         None,
     )
@@ -399,6 +417,7 @@ def sample_payload() -> list[dict[str, Any]]:
                     "endDate": "2026-07-06T12:15:00+00:00",
                     "outcomes": '["Up", "Down"]',
                     "clobTokenIds": '["up-token-current", "down-token-current"]',
+                    "openPrice": "100.05",
                 }
             ],
         },
@@ -553,6 +572,8 @@ def self_check() -> Path:
     assert current["selection"]["market_id"] == "market-current"
     assert current["selection"]["up_token_id"] == "up-token-current"
     assert current["selection"]["down_token_id"] == "down-token-current"
+    assert current["selection"]["polymarket_open_price"] == 100.05
+    assert current["selection"]["polymarket_open_price_source"] == "openPrice"
     assert next_result["selection"]["market_id"] == "market-next"
     assert next_with_extra_future["selection"]["market_id"] == "market-next"
     assert rotation["selection"]["market_id"] == "market-next"

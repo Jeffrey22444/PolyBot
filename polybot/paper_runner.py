@@ -181,13 +181,17 @@ async def run_session_once(
     now: datetime | None = None,
     entry_remain_seconds: tuple[int, ...] = (180, 240),
     move_threshold_pct: float = 0.05,
-) -> None:
+    observe_start_remaining_seconds: int | None = 300,
+    p_hat_filter_enabled: bool = True,
+    market_seconds: float | None = None,
+    btc_seconds: float | None = None,
+) -> dict[str, Any]:
     session_meta = session_summary(session)
     append_jsonl(output, "runtime_note", {"note": "session_runner_started", "session": session_meta})
 
     if btc_records is None:
         try:
-            btc_records = await capture_btc_reference(seconds, limit=5)
+            btc_records = await capture_btc_reference(btc_seconds if btc_seconds is not None else seconds, limit=5)
         except Exception as exc:
             append_jsonl(output, "runtime_note", {"note": "btc_capture_failed", "session": session_meta, "error": f"{type(exc).__name__}: {exc}"})
             btc_records = []
@@ -198,32 +202,34 @@ async def run_session_once(
     current_price = latest_btc_price(btc_records)
     if current_price is None:
         append_jsonl(output, "runtime_note", {"note": "missing_btc_reference_price", "session": session_meta})
-        return
+        return {"status": "skipped", "reason": "missing_btc_reference_price"}
 
+    signal_now = now or utc_now()
     signal_record = build_signal_record(
         open_price=open_price,
         current_price=current_price,
         market_end_time=parse_datetime(session["market_end_time"]),
-        now=now or utc_now(),
+        now=signal_now,
         entry_remain_seconds=entry_remain_seconds,
         move_threshold_pct=move_threshold_pct,
+        observe_start_remaining_seconds=observe_start_remaining_seconds,
     )
     append_jsonl(output, "signal_record", {"session": session_meta, "record": signal_record})
 
     token = selected_token(session, signal_record.signal)
     if signal_record.signal == Signal.NO_SIGNAL:
         append_jsonl(output, "runtime_note", {"note": "no_signal_no_token_selected", "session": session_meta, "selected_token": token})
-        return
+        return {"status": "no_signal", "signal_record": signal_record}
     if not token["token_id"]:
         append_jsonl(output, "runtime_note", {"note": "missing_token_id", "session": session_meta, "selected_token": token})
         skipped = SkippedTradeRecord(signal_record.signal, "missing_token_id", stake)
         append_jsonl(output, "skipped_trade_record", {"session": session_meta, "selected_token": token, "record": skipped})
-        return
+        return {"status": "skipped", "reason": "missing_token_id", "signal_record": signal_record, "decision": skipped, "selected_token": token}
 
     append_jsonl(output, "runtime_note", {"note": "selected_token", "session": session_meta, "selected_token": token})
     if market_records is None:
         try:
-            market_records = await capture_polymarket_market([str(token["token_id"])], seconds, limit=5)
+            market_records = await capture_polymarket_market([str(token["token_id"])], market_seconds if market_seconds is not None else seconds, limit=5)
         except Exception as exc:
             append_jsonl(output, "runtime_note", {"note": "market_capture_failed", "session": session_meta, "selected_token": token, "error": f"{type(exc).__name__}: {exc}"})
             market_records = []
@@ -236,16 +242,20 @@ async def run_session_once(
         append_jsonl(output, "runtime_note", {"note": "missing_polymarket_book", "session": session_meta, "selected_token": token})
         skipped = SkippedTradeRecord(signal_record.signal, "missing_polymarket_book", stake)
         append_jsonl(output, "skipped_trade_record", {"session": session_meta, "selected_token": token, "record": skipped})
-        return
+        return {"status": "skipped", "reason": "missing_polymarket_book", "signal_record": signal_record, "decision": skipped, "selected_token": token}
 
     decision = evaluate_marketability(
         signal=signal_record.signal,
         market_record=book,
         stake=stake,
         caller_supplied_p_hat=caller_supplied_p_hat,
+        p_hat_filter_enabled=p_hat_filter_enabled,
     )
     record_type = "paper_trade_record" if isinstance(decision, PaperTradeRecord) else "skipped_trade_record"
     append_jsonl(output, record_type, {"session": session_meta, "selected_token": token, "record": decision})
+    if isinstance(decision, PaperTradeRecord):
+        return {"status": "paper_opened", "signal_record": signal_record, "decision": decision, "selected_token": token}
+    return {"status": "skipped", "reason": decision.skip_reason, "signal_record": signal_record, "decision": decision, "selected_token": token}
 
 
 def sample_market_records() -> list[CaptureRecord]:
@@ -345,6 +355,19 @@ async def session_self_check() -> Path:
         stake=9.0,
         output=output,
         seconds=1.0,
+        caller_supplied_p_hat=None,
+        p_hat_filter_enabled=False,
+        market_records=sample_market_records(),
+        btc_records=sample_btc_records_with_price("100.06"),
+        now=datetime(2026, 7, 6, 12, 10, tzinfo=timezone.utc),
+        observe_start_remaining_seconds=300,
+    )
+    await run_session_once(
+        session=session,
+        open_price=100.0,
+        stake=9.0,
+        output=output,
+        seconds=1.0,
         caller_supplied_p_hat=0.55,
         market_records=sample_market_records(),
         btc_records=sample_btc_records_with_price("99.94"),
@@ -378,11 +401,14 @@ async def session_self_check() -> Path:
     selected = [record["selected_token"] for record in records if record.get("note") == "selected_token"]
     assert selected[0]["side"] == "UP"
     assert selected[0]["token_id"] == "up-token-current"
-    assert selected[1]["side"] == "DOWN"
-    assert selected[1]["token_id"] == "down-token-current"
+    assert selected[1]["side"] == "UP"
+    assert selected[1]["token_id"] == "up-token-current"
+    assert selected[2]["side"] == "DOWN"
+    assert selected[2]["token_id"] == "down-token-current"
     assert any(record.get("note") == "no_signal_no_token_selected" for record in records)
     assert not any(record["record_type"] == "paper_trade_record" and record.get("record", {}).get("signal") == "NO_SIGNAL" for record in records)
     assert any(record.get("note") == "missing_token_id" for record in records)
+    assert any(record["record_type"] == "paper_trade_record" and record.get("record", {}).get("caller_supplied_p_hat") is None for record in records)
     assert session_open_price(None, {**session, "open_price": 101.0}) == 101.0
     assert session_open_price(102.0, {**session, "open_price": 101.0}) == 102.0
     return output
@@ -400,6 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--p-hat", type=float)
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--entry-remain-seconds", default="180,240")
+    parser.add_argument("--observe-start-remaining-seconds", type=int, default=300)
     parser.add_argument("--move-threshold-pct", type=float, default=0.05)
     parser.add_argument("--output", type=Path)
     return parser
@@ -441,6 +468,7 @@ async def async_main(args: argparse.Namespace) -> int:
             caller_supplied_p_hat=p_hat,
             entry_remain_seconds=parse_entry_remain_seconds(args.entry_remain_seconds),
             move_threshold_pct=args.move_threshold_pct,
+            observe_start_remaining_seconds=args.observe_start_remaining_seconds,
         )
         print(json.dumps({"output": str(args.output)}, sort_keys=True))
         return 0
@@ -465,6 +493,7 @@ async def async_main(args: argparse.Namespace) -> int:
         output=args.output,
         seconds=args.seconds,
         caller_supplied_p_hat=args.p_hat,
+        observe_start_remaining_seconds=args.observe_start_remaining_seconds,
     )
     print(json.dumps({"output": str(args.output)}, sort_keys=True))
     return 0

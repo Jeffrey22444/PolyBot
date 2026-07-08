@@ -71,7 +71,18 @@ def enrich_session_config(
     selection = session_config.get("selection", session_config)
     if not isinstance(selection, dict):
         raise ValueError("session config must contain a selection object")
+    if selection.get("polymarket_open_price") is not None:
+        result = {
+            "open_price_capture_status": "captured",
+            "open_price": float(selection["polymarket_open_price"]),
+            "open_price_timestamp": selection["market_start_time"],
+            "open_price_source": f"polymarket:{selection.get('polymarket_open_price_source') or 'reference'}",
+            "open_price_max_delay_seconds": max_delay_seconds,
+        }
+        return {"selection": {**selection, **result}, "skip_reason": None}
     result = select_open_price(records, parse_datetime(selection["market_start_time"]), max_delay_seconds)
+    if result["open_price_capture_status"] == "captured":
+        result["open_price_source"] = "binance_btcusdt_fallback"
     enriched = {**selection, **result}
     return {"selection": enriched, "skip_reason": None if result["open_price_capture_status"] == "captured" else result["skip_reason"]}
 
@@ -120,8 +131,10 @@ def self_check() -> Path:
     )
     start_ms = int(parse_datetime(session_config["selection"]["market_start_time"]).timestamp() * 1000)
 
+    polymarket_valid = enrich_session_config(session_config, [], 5)
+    fallback_session = {"selection": {**session_config["selection"], "polymarket_open_price": None, "polymarket_open_price_source": None}}
     valid = enrich_session_config(
-        session_config,
+        fallback_session,
         [
             sample_record("99.90", start_ms - 1),
             sample_record("100.01", start_ms),
@@ -129,21 +142,24 @@ def self_check() -> Path:
         ],
         5,
     )
-    pre_start = enrich_session_config(session_config, [sample_record("99.90", start_ms - 1)], 5)
-    stale = enrich_session_config(session_config, [sample_record("100.01", start_ms + 6000)], 5)
+    pre_start = enrich_session_config(fallback_session, [sample_record("99.90", start_ms - 1)], 5)
+    stale = enrich_session_config(fallback_session, [sample_record("100.01", start_ms + 6000)], 5)
     invalid = enrich_session_config(
-        session_config,
+        fallback_session,
         [sample_record("0", start_ms), sample_record("not-a-number", start_ms + 1000)],
         5,
     )
 
+    assert polymarket_valid["selection"]["open_price"] == 100.05
+    assert polymarket_valid["selection"]["open_price_source"] == "polymarket:openPrice"
     assert valid["selection"]["open_price"] == 100.01
     assert valid["selection"]["open_price_capture_status"] == "captured"
+    assert valid["selection"]["open_price_source"] == "binance_btcusdt_fallback"
     assert pre_start["skip_reason"] == "no_post_start_record"
     assert stale["skip_reason"] == "stale_open_price_record"
     assert invalid["skip_reason"] == "invalid_open_price"
 
-    write_json(output, valid)
+    write_json(output, polymarket_valid)
     return output
 
 

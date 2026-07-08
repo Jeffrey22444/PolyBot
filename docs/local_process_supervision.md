@@ -23,32 +23,19 @@ It creates:
 - stdout/stderr log files: `runs/paper-btc-15m-logs/<UTC timestamp>.log`
 - latest log pointer: `runs/paper-btc-15m-logs/latest_log.txt`
 
-Then it `exec`s the Phase 22 canonical command:
+Then it `exec`s the configured paper command:
 
 ```bash
 python3 -m polybot.e2e_dry_run \
-  --max-sessions 96 \
-  --max-runtime-seconds 90000 \
-  --paper-stake 9 \
-  --p-hat 0.55 \
-  --capture-seconds 8 \
-  --capture-limit 5 \
-  --runner-seconds 8 \
-  --heartbeat-interval-seconds 30 \
-  --retry-limit 1 \
-  --retry-backoff-seconds 5 \
-  --search-query "bitcoin up down 15m" \
-  --mode next \
-  --max-pages 10 \
-  --limit 100 \
-  --lookahead-minutes 90 \
-  --max-wait-to-open-seconds 900 \
-  --max-wait-to-entry-seconds 900 \
-  --entry-window-tolerance-seconds 3 \
-  --max-open-price-delay-seconds 5 \
+  --config "$REPO_DIR/configs/polymarket_paper_btc_15m.yaml" \
   --attempt-public-resolution \
   --run-dir "$RUN_DIR"
 ```
+
+The YAML controls the final-300-second observation window, `0.05%` threshold,
+paper stake, `p_hat` filter, discovery, timing, capture, runtime, and operator
+brief output. The launcher still only starts the existing CLI and keeps local
+logs.
 
 ## One-Time Manual Install
 

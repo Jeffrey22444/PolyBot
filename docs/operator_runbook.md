@@ -1,8 +1,8 @@
 # PolyBot Operator Runbook
 
 This runbook covers the current paper-only BTC 15m public path. It uses the
-existing CLI directly. No config wrapper, background-process installer, or
-live-order path is required for Phase 22.
+existing CLI directly with a repo-local YAML config. No background-process
+installer or live-order path is required.
 
 ## Start A Paper Run
 
@@ -17,25 +17,7 @@ Recommended copy-paste command:
 
 ```bash
 python3 -m polybot.e2e_dry_run \
-  --max-sessions 96 \
-  --max-runtime-seconds 90000 \
-  --paper-stake 9 \
-  --p-hat 0.55 \
-  --capture-seconds 8 \
-  --capture-limit 5 \
-  --runner-seconds 8 \
-  --heartbeat-interval-seconds 30 \
-  --retry-limit 1 \
-  --retry-backoff-seconds 5 \
-  --search-query "bitcoin up down 15m" \
-  --mode next \
-  --max-pages 10 \
-  --limit 100 \
-  --lookahead-minutes 90 \
-  --max-wait-to-open-seconds 900 \
-  --max-wait-to-entry-seconds 900 \
-  --entry-window-tolerance-seconds 3 \
-  --max-open-price-delay-seconds 5 \
+  --config configs/polymarket_paper_btc_15m.yaml \
   --attempt-public-resolution \
   --run-dir "$RUN_DIR"
 ```
@@ -43,9 +25,29 @@ python3 -m polybot.e2e_dry_run \
 Notes:
 
 - `--p-hat` is still caller-supplied. It is not a trained or inferred model.
+- `configs/polymarket_paper_btc_15m.yaml` controls the observation window,
+  threshold, stake, `p_hat` filter, discovery, timing, capture, runtime, and
+  operator-output defaults.
+- The default local ledger is `data/paper_trades.sqlite3`. It is a supplemental
+  inspection file; JSON artifacts remain the source for run/session artifacts.
+- Command-line flags such as `--paper-stake`, `--move-threshold-pct`, or
+  `--no-p-hat-filter-enabled` override the YAML for that run.
 - `--mode next` plus `--search-query "bitcoin up down 15m"` is the current
   calibrated public BTC 15m path.
 - `runs/` is ignored by Git, so local artifacts stay out of commits by default.
+
+During a run, stdout prints compact operator briefs with Beijing-time prefixes.
+Machine artifacts still keep their normal JSON/ISO timestamps.
+
+```text
+[2026-07-08 12:00:00 CST] [RUN_START] run_dir=... config=... max_sessions=... stake=... p_hat_filter=...
+[2026-07-08 12:10:02 CST] [TRADE] market_id=... side=UP stake=9.0 ask=0.84 shares=10.7143 move=0.0521% rem=242
+[2026-07-08 12:10:03 CST] [SKIP] market_id=... reason=non_positive_trade_edge move=0.0521% rem=242
+[2026-07-08 12:15:01 CST] [RESULT] market_id=... side=UP winning_side=UP result=WIN pnl=+1.71 equity=1001.71 return=0.1710% win_rate=100.0000% settled=1
+```
+
+The terminal and ledger intentionally avoid raw orderbook payloads, raw BTC
+ticks, token IDs, and long slugs.
 
 ## Safe Stop
 
@@ -105,6 +107,33 @@ Check aggregate outcome and per-session index:
 python3 -m json.tool "$RUN_DIR/summary.json"
 python3 -m json.tool "$RUN_DIR/session_index.json"
 ```
+
+Check the local trade ledger:
+
+```bash
+python3 - <<'PY'
+import sqlite3
+conn = sqlite3.connect("data/paper_trades.sqlite3")
+conn.row_factory = sqlite3.Row
+for row in conn.execute(
+    "select market_id, market_start_time, open_price_source, side, result, paper_pnl, cumulative_pnl, equity_after, skip_reason from paper_trades order by market_start_time"
+):
+    print(dict(row))
+PY
+```
+
+Ledger notes:
+
+- One row is kept per `market_id` using upsert semantics.
+- `result` is one of `WIN`, `LOSS`, `PENDING`, `SKIPPED`, or `NO_TRADE`.
+- `initial_bankroll` defaults to `1000` in
+  `configs/polymarket_paper_btc_15m.yaml`.
+- If Polymarket public metadata provides an open/reference price, the ledger
+  records `open_price_source=polymarket:<field>`. Otherwise the existing BTC
+  capture path is used and recorded as
+  `open_price_source=binance_btcusdt_fallback`.
+- `p_hat` remains caller-supplied. It is not a model, training output, or
+  inferred estimate.
 
 Check the end-to-end report and recent heartbeat lines:
 
@@ -171,9 +200,11 @@ Check `dry_run_report.json` first.
   post-open reference price.
 - `wait_to_open_budget_exceeded`: the session start was too far away for the
   configured wait budget.
-- `wait_to_entry_budget_exceeded`: the entry window was too far away for the
+- `wait_to_observation_budget_exceeded`: the observation window was too far away for the
   configured wait budget.
-- `entry_window_missed`: the entry point was missed or reached too late.
+- `observation_window_missed`: the observation window was already over.
+- `observation_window_no_signal`: no movement crossed the configured threshold
+  before the market ended.
 
 Helpful spot checks:
 
@@ -216,24 +247,25 @@ runbook.
 
 ## Parameter Quick Reference
 
-- `--search-query`: public discovery query; current BTC 15m path uses
-  `"bitcoin up down 15m"`.
-- `--mode`: session selection mode; use `next` for the current calibrated path.
-- `--max-sessions`: upper bound on processed sessions in one run.
-- `--max-runtime-seconds`: upper bound on wall-clock runtime for one run.
-- `--max-wait-to-open-seconds`: wait budget before market open.
-- `--max-wait-to-entry-seconds`: wait budget before entry timing.
-- `--entry-window-tolerance-seconds`: lateness tolerance around entry timing.
-- `--capture-seconds`: BTC reference capture duration.
-- `--capture-limit`: max BTC reference records kept for open-price selection.
-- `--runner-seconds`: paper runner duration once entry starts.
-- `--heartbeat-interval-seconds`: heartbeat frequency for local status output.
-- `--retry-limit`: recoverable retry count for process-local long-run handling.
-- `--retry-backoff-seconds`: pause between recoverable retries.
+- `--config`: YAML config path. Default operator config is
+  `configs/polymarket_paper_btc_15m.yaml`.
+- `--search-query`, `--mode`, `--max-pages`, `--limit`,
+  `--lookahead-minutes`: discovery controls.
+- `--max-sessions`, `--max-runtime-seconds`, `--retry-limit`,
+  `--retry-backoff-seconds`, `--heartbeat-interval-seconds`: runtime controls.
+- `--max-wait-to-open-seconds`, `--max-wait-to-observation-seconds`,
+  `--max-open-price-delay-seconds`: timing controls.
+- `--capture-seconds`, `--capture-limit`, `--observation-tick-seconds`,
+  `--runner-seconds`: BTC/open-price and orderbook capture controls.
 - `--paper-stake`: fixed paper stake.
+- `--initial-bankroll`: local ledger bankroll baseline.
+- `--ledger-path`: local SQLite ledger path. Defaults to
+  `data/paper_trades.sqlite3`.
 - `--p-hat`: caller-supplied win probability input for marketability.
-- `--entry-remain-seconds`: allowed entry offsets before market end, such as
-  `180,240`.
+- `--p-hat-filter-enabled` / `--no-p-hat-filter-enabled`: enable or disable
+  the `p_hat` edge filter while keeping ask-depth tradability checks.
+- `--observe-start-remaining-seconds`: start observing this many seconds before
+  market end.
 - `--move-threshold-pct`: root signal movement threshold.
 - `--attempt-public-resolution`: try conservative public result closing after
   completed sessions.

@@ -14,7 +14,7 @@ listing every related doc as mandatory.
 1. Read this file first.
 2. Read `docs/project_notes/zone_operating_model.md`.
 3. Read `docs/project_notes/key_facts.md` before assuming commands, paths, ports, or conventions.
-4. Read `docs/product_consensus/polymarket_paper_trader_v1.md` before discussing or changing strategy behavior.
+4. Read `docs/product_consensus/polymarket_paper_trader_logic_chain.md` before discussing or changing strategy behavior.
 5. Read `docs/architecture.md` before changing module boundaries, data flow, or execution/reporting separation.
 6. Read `docs/implementation-plan.md` before sequencing phases, choosing deliverables, or defining verification gates.
 7. Search `docs/project_notes/bugs.md` before debugging familiar errors.

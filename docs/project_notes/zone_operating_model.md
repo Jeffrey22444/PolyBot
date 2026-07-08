@@ -43,6 +43,7 @@ Preferred output:
 - default to a two-hop flow: `规划区 -> 执行区`, then `规划区 -> 验收区`; execution evidence should be written back into `issues.md` instead of manually relayed by the user
 - write the active task card and acceptance contract to `current_task.md`; do not keep growing historical task-card files
 - when `current_task.md` is the active task surface, the planning reply should not repeat the full task card; end with short copy-ready prompts that tell `执行区` or `验收区` to read `current_task.md` and name the task ID
+- when `规划区` gives `执行区` a short `current_task.md` prompt, include the paired short `验收区` prompt in the same reply unless the user explicitly says to skip acceptance
 - when using a `/private/tmp` handoff, include the absolute handoff path and direct paste targets for the next zone
 - keep `issues.md` minimal: current recommended next task plus short evidence/decision summaries, not full paste-ready prompts
 

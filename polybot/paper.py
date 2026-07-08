@@ -22,9 +22,9 @@ class PaperTradeRecord:
     stake: float
     shares: float
     executable_avg_ask: float
-    caller_supplied_p_hat: float
-    trade_edge: float
-    kelly_fraction_reference: float
+    caller_supplied_p_hat: float | None
+    trade_edge: float | None
+    kelly_fraction_reference: float | None
 
 
 @dataclass(frozen=True)

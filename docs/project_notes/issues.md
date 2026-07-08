@@ -2,13 +2,287 @@
 
 ## Current Summary
 
-- Current phase: planned paper-bot build track complete; simulated operation active
-- Current recommended next task: run the local paper bot and handle real failures as bug-driven fixes
+- Current phase: minimal trade ledger and Polymarket-open execution complete; ready for separate acceptance if requested
+- Current recommended next task: review `polybot-paper-minimal-trade-ledger-and-polymarket-open`
 - Latest accepted slice: Phase 23 local process supervision
-- Open blockers: none for planning; final `p_hat` model and live trading remain explicit future product decisions outside the fixed paper-bot plan
+- Open blockers: none for planning; final `p_hat` model and live trading remain explicit future product decisions outside this config/operator UX task
 - Last updated: 2026-07-08
 
 ## Log
+
+### 2026-07-08 - Main Publish For Current Project State
+
+- Goal: Commit the current full PolyBot workspace state and push it to `origin/main`.
+- Changed:
+  - Updated `docs/project_notes/issues.md`
+- Verified:
+  - Local branch is `main`
+  - `origin` points to `https://github.com/Jeffrey22444/PolyBot.git`
+  - The worktree contains the current project changes requested for full-project publish
+- Scope skipped:
+  - No additional product or architecture changes were introduced by this maintenance step
+
+### 2026-07-08 - Planning Handoff Prompt Rule Clarified
+
+- Clarified in `docs/project_notes/zone_operating_model.md` that when `规划区`
+  gives `执行区` a short prompt pointing at `current_task.md`, it should include
+  the paired short `验收区` prompt in the same reply unless the user explicitly
+  says to skip acceptance.
+- No business code changed by this planning-rule update.
+
+### 2026-07-08 - Minimal Trade Ledger And Polymarket Open Execution
+
+任务ID：
+polybot-paper-minimal-trade-ledger-and-polymarket-open
+
+改动文件：
+- Added `polybot/trade_ledger.py`
+- Updated `polybot/e2e_dry_run.py`
+- Updated `polybot/market_discovery.py`
+- Updated `polybot/open_price.py`
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Updated `.gitignore`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/project_notes/issues.md`
+
+实现要点：
+- Added a standard-library `sqlite3` local ledger at default path `data/paper_trades.sqlite3`.
+- Added one-row-per-`market_id` upsert behavior with minimal fields for market timing, open price/source, observation threshold, decision timing/move, side, stake/ask/shares, result, winning side, paper PnL, cumulative PnL, equity, ROI, and skip reason.
+- Added `paper.initial_bankroll: 1000` and `paper.ledger_path: "data/paper_trades.sqlite3"` to the canonical BTC 15m paper config.
+- Discovery now carries optional Polymarket public open/reference price fields when present.
+- Open-price enrichment prefers Polymarket public metadata/reference/open fields and records `open_price_source=polymarket:<field>`; otherwise it keeps the existing Binance capture fallback and records `open_price_source=binance_btcusdt_fallback`.
+- `e2e_dry_run` now writes ledger rows at session start, open-price capture, paper trade/skip, result closing, and `--close-existing-run-dir` closing.
+- Operator stdout now uses compact per-market `[TRADE]`, `[SKIP]`, and `[RESULT]` lines while keeping Beijing-time prefixes from the previous slice.
+- `p_hat` remains caller-supplied only; no model, training, estimation, or backfill was added.
+
+运行命令：
+- `python3 -m polybot.trade_ledger --self-check`
+- `python3 -m polybot.open_price --self-check`
+- `python3 -m polybot.market_discovery --self-check`
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `python3 -m polybot.long_run --help`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `rg -n "wallet|signing|order placement|order|p_hat model|p_hat training|training|DB schema|SQLite schema|ORM|cloud deployment|root/system|system daemon|LaunchDaemon|machine restart" polybot/trade_ledger.py polybot/e2e_dry_run.py polybot/open_price.py polybot/market_discovery.py configs/polymarket_paper_btc_15m.yaml docs/operator_runbook.md .gitignore`
+
+结果：
+- `trade_ledger --self-check` passed; it proved upsert without duplicate rows, `WIN`/`LOSS`/`PENDING`/`SKIPPED`/`NO_TRADE` statuses, win-rate/cumulative-PnL/equity/return stats, and absence of raw orderbook/tick/payload/token-id ledger columns.
+- `open_price --self-check` passed; it covers Polymarket-priority open price and Binance fallback source labeling.
+- `market_discovery --self-check` passed; it covers the optional Polymarket open price fields.
+- `e2e_dry_run --self-check` passed; it covers config overrides, temporary ledger path, two skipped market rows, and existing artifact generation.
+- Both CLI help commands passed.
+- `compileall` passed.
+- `git diff --check` passed.
+- Forbidden search had only contextual/negative hits: runbook says no live-order path; runbook says `p_hat` is caller-supplied and not a model/training output; existing discovery parses `acceptingOrders`; ledger self-check asserts no raw/token columns.
+
+手工检查：
+- Ledger supplements existing JSON artifacts; artifact semantics and runner output remain in place.
+- Terminal output avoids raw payloads, raw BTC ticks, token IDs, and long slugs.
+- No wallet, signing, credential, live order placement, cloud deployment, root/system daemon, machine restart policy, ORM, external storage, or new dependency was added.
+- Ponytail review: Lean already. Ship.
+
+范围外未做：
+- No strategy, signal, observation-window threshold, marketability, fill, resolution policy, PnL semantics, stake sizing, final `p_hat` model, training, backfill, live trading, wallet/signing, DB/ORM service, UI, notification, cloud, or supervisor/service behavior change.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-08 - Minimal Trade Ledger And Polymarket Open Task Ready
+
+- Goal: Prepare the next execution task after user accepted the Beijing-time operator output slice.
+- User-approved behavior:
+  - Treat every BTC 15m market as one independent paper-trade record.
+  - Store a minimal local backend ledger for later review across however many markets have run.
+  - Optimize the ledger for overall win rate, cumulative paper PnL, simulated equity/ROI from a default 1000 initial bankroll, and failure conditions such as remaining time, move percentage, threshold, side, and skip reason.
+  - The simulated bankroll is accounting-only and must not change stake sizing or trade decisions.
+  - Keep terminal output minimal: one compact trade/skip line and one compact result/pending line per market at most.
+  - Align open price with Polymarket public source when possible; clearly mark fallback source otherwise.
+- Accepted by user:
+  - `polybot-paper-operator-output-beijing-time`
+- Active task:
+  - `docs/project_notes/current_task.md`
+  - `polybot-paper-minimal-trade-ledger-and-polymarket-open`
+- Scope skipped:
+  - No execution work performed by planning.
+  - No business code changed by planning.
+
+### 2026-07-08 - Operator Beijing-Time Output Execution
+
+任务ID：
+polybot-paper-operator-output-beijing-time
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Added a standard-library Beijing time formatter for human-readable operator stdout only: `timezone(timedelta(hours=8), "CST")`.
+- `operator_print` now prefixes every operator brief line with `[YYYY-MM-DD HH:MM:SS CST]`.
+- `MARKET_SELECTED` start/end fields now display Beijing time for the human brief.
+- Kept JSON artifacts, machine timestamps, WebSocket source timestamps, strategy logic, observation window, threshold, stake, `p_hat` filtering, marketability, fills, resolution, and PnL semantics unchanged.
+- Did not add timezone dependencies or a timezone configuration system.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `python3 -m polybot.e2e_dry_run --help`
+- `python3 -c "from datetime import datetime, timezone; from polybot.e2e_dry_run import beijing_time_text, operator_time; print(beijing_time_text(datetime(2026,7,8,4,0,tzinfo=timezone.utc))); print(operator_time('2026-07-08T04:15:00+00:00'))"`
+- `git diff --check`
+- `rg -n "stop-loss|stop loss|take-profit|take profit|reverse|reversal|grid|multi-entry|multiple entries|wallet|signing|credential|real order|live order|account API|database|SQLite|sqlite|ORM|cloud deployment|notification|UI|p_hat model|train|training|backfill" polybot/e2e_dry_run.py docs/operator_runbook.md`
+
+结果：
+- `e2e_dry_run --self-check` passed and now asserts:
+  - `2026-07-08T04:00:00Z` formats as `2026-07-08 12:00:00 CST`
+  - `operator_time("2026-07-08T04:15:00+00:00")` formats as `2026-07-08 12:15:00 CST`
+- `compileall` passed.
+- `e2e_dry_run --help` passed; no strategy/runtime CLI behavior was changed for this task.
+- Direct helper check printed:
+  - `2026-07-08 12:00:00 CST`
+  - `2026-07-08 12:15:00 CST`
+- `git diff --check` passed.
+- Forbidden search only found the existing runbook note that `p_hat` is not a trained or inferred model.
+
+手工检查：
+- `operator_print` remains guarded by `operator_output.enabled`.
+- Only stdout/operator brief formatting changed; artifact writers still use existing JSON/ISO paths.
+- `docs/operator_runbook.md` examples now show Beijing-time prefixes and Beijing-time market start/end fields.
+- Ponytail review: Lean already. Ship. No new dependency, config layer, or broad refactor.
+
+范围外未做：
+- No strategy, observation-window, threshold, paper stake, `p_hat`, discovery, open-price, marketability, fill, resolution, PnL, artifact schema, database, UI, notification, live trading, wallet/signing, cloud, or service behavior change.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-08 - Operator Beijing-Time Output Task Ready
+
+- Goal: Prepare a narrow execution task to show paper-run operator brief times in Beijing time.
+- Active task:
+  - `docs/project_notes/current_task.md`
+  - `polybot-paper-operator-output-beijing-time`
+- Scope:
+  - Human-readable stdout/operator brief formatting only.
+  - Keep machine artifacts and trading logic unchanged.
+- Scope skipped:
+  - No execution work performed by planning.
+  - No business code changed by planning.
+
+### 2026-07-08 - Observation Window Config And Operator Briefs Execution
+
+任务ID：
+polybot-paper-observation-window-config-and-operator-briefs
+
+改动文件：
+- Added `configs/polymarket_paper_btc_15m.yaml`
+- Updated `requirements.txt`
+- Updated `polybot/e2e_dry_run.py`
+- Updated `polybot/signal.py`
+- Updated `polybot/paper_runner.py`
+- Updated `polybot/marketability.py`
+- Updated `polybot/paper.py`
+- Updated `scripts/paper_btc_15m_launch.sh`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Implemented the approved BTC 15m paper behavior: observe continuously during the final configurable window, default `observe_start_remaining_seconds=300`, and attempt at most one paper entry on the first threshold crossing.
+- Added YAML config loading for `polybot.e2e_dry_run --config`, with command-line flags overriding YAML values.
+- Added config validation for positive stake, non-negative thresholds/timing/capture values, `max_entries_per_market == 1`, and valid `p_hat` when the filter is enabled.
+- Added configurable `p_hat` filtering: enabled preserves existing `p_hat=0.55` and positive edge behavior; disabled still requires direction signal, mapped token, and ask depth but does not skip solely for missing/non-positive `p_hat`.
+- Added low-frequency operator brief lines for run start, market selection, observation start, trigger/final market check, paper open, skip, and market result.
+- Updated launcher to pass `--config configs/polymarket_paper_btc_15m.yaml` plus `--run-dir`, avoiding duplicated long defaults.
+- Did not add stop-loss, take-profit, reversal, averaging, grid, multi-entry, live trading, wallet/signing, account API, database, UI, notification system, cloud deployment, service changes, or `p_hat` modeling.
+
+运行命令：
+- `python3 -m pip install 'PyYAML>=6,<7'`
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.paper_runner --session-self-check`
+- `python3 -m polybot.marketability`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `python3 -m polybot.signal`
+- `python3 -m polybot.e2e_dry_run --help`
+- `git diff --check`
+- `rg -n "stop-loss|stop loss|take-profit|take profit|reverse|reversal|grid|multi-entry|multiple entries|wallet|signing|credential|real order|live order|account API|database|SQLite|sqlite|ORM|cloud deployment|notification|UI|p_hat model|train|training|backfill" configs docs/product_consensus/polymarket_paper_trader_logic_chain.md docs/operator_runbook.md docs/local_process_supervision.md polybot scripts requirements.txt`
+- `rg -n "4 minutes|3 minutes|fixed check|wait_to_entry|wait_to_entry_budget|entry_window_missed|max_wait_to_entry" docs/product_consensus/polymarket_paper_trader_logic_chain.md docs/operator_runbook.md docs/local_process_supervision.md scripts/paper_btc_15m_launch.sh configs/polymarket_paper_btc_15m.yaml polybot/e2e_dry_run.py`
+
+结果：
+- Required self-checks passed:
+  - `python3 -m polybot.e2e_dry_run --self-check`
+  - `python3 -m polybot.paper_runner --session-self-check`
+  - `python3 -m polybot.marketability`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+  - `bash -n scripts/paper_btc_15m_launch.sh`
+- Extra signal check passed: `python3 -m polybot.signal`.
+- `git diff --check` passed.
+- `e2e_dry_run --help` now exposes `--config`, `--observe-start-remaining-seconds`, `--observation-tick-seconds`, `--max-wait-to-observation-seconds`, and `--p-hat-filter-enabled/--no-p-hat-filter-enabled`; old e2e fixed-entry args are no longer exposed.
+- `marketability` self-check proves the difference between enabled and disabled `p_hat` filtering with `"p_hat_filter_disabled_filled": true`.
+- `paper_runner --session-self-check` covers observation-window triggering and disabled-`p_hat` fill behavior.
+- `e2e_dry_run --self-check` covers YAML loading/defaults plus command-line override of YAML values.
+
+手工检查：
+- `configs/polymarket_paper_btc_15m.yaml` contains the requested strategy/paper/marketability/discovery/timing/capture/runtime/operator_output sections.
+- `run_manifest.json` config snapshot uses the final effective config from YAML plus CLI overrides via `args.config_snapshot`.
+- Operator brief output is one line per major event, not per WebSocket tick or full orderbook.
+- Launcher now starts the configured CLI and still only creates run/log directories plus local pointers before `exec`.
+- Forbidden search hits were documentation-only negative statements such as "not live trading" / "not trained" / "does not include", plus false positives from `reversed(records)`; no implementation path for forbidden behavior was added.
+- Old fixed-entry search found no matches in the e2e/operator/config path.
+
+范围外未做：
+- No stop-loss, take-profit, reversal, averaging, grid, multi-entry, live trading, wallet/signing/credentials, account API, database/SQLite/ORM/schema, UI, notifications, cloud deployment, new service, or `p_hat` model/training/backfill.
+- No change to public data source selection beyond config-driven existing discovery parameters.
+- No long public soak.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-08 - Observation Window And Config Task Ready
+
+- Goal: Convert the user-approved strategy adjustment into an execution-ready task.
+- User-approved behavior:
+  - No stop-loss concept belongs in this strategy.
+  - Entry logic should observe continuously during the final configurable N seconds of a BTC 15m market.
+  - The default observation window is the last 300 seconds.
+  - The move threshold remains configurable, defaulting to `0.05%`.
+  - `p_hat` is a configurable marketability filter, not part of the root signal and not a model.
+  - `p_hat` filtering should be switchable on/off.
+- Active task:
+  - `docs/project_notes/current_task.md`
+  - `polybot-paper-observation-window-config-and-operator-briefs`
+- Scope skipped:
+  - No execution work performed by planning.
+  - No business code changed by planning.
+
+### 2026-07-08 - Product Consensus Updated For Observation Window
+
+- Goal: Fix product consensus docs so they match the user-approved strategy logic before execution.
+- Changed:
+  - Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+  - Updated `docs/product_consensus/polymarket_paper_trader_v1.md`
+  - Updated `docs/project_notes/current_task.md`
+- Current consensus:
+  - The active strategy starts continuous observation during the final configurable N seconds of the BTC 15m market.
+  - The default observation window starts at 300 seconds remaining.
+  - The first threshold crossing may create one paper entry.
+  - `p_hat` is an optional marketability filter, not part of the root signal and not a model.
+  - No stop-loss concept belongs in this strategy.
+- Scope skipped:
+  - No execution work performed by planning.
+  - No business code changed by planning.
+
+### 2026-07-08 - Product Consensus Folder Consolidated
+
+- Goal: Keep `docs/product_consensus/` limited to the latest active strategy logic.
+- Changed:
+  - Kept `docs/product_consensus/polymarket_paper_trader_logic_chain.md` as the only active product consensus document.
+  - Removed the historical `docs/product_consensus/polymarket_paper_trader_v1.md` file.
+  - Updated `AGENTS.md` and `docs/project_notes/key_facts.md` so future runs read the active consensus file.
+- Scope skipped:
+  - No business code changed.
+  - Historical task-card archives were not rewritten.
 
 ### 2026-07-08 - Main Branch Publish
 

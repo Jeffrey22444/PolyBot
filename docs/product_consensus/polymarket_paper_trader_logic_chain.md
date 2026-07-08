@@ -1,45 +1,67 @@
 # Polymarket Paper Trader Logic Chain
 
-## Purpose
+This document is the shared human-readable strategy reference for the PolyBot
+BTC 15m paper trader.
 
-This document explains the paper BTC 15m trading logic in human terms.
+When any zone discusses BTC 15m paper-trading behavior, entry timing,
+configuration, `p_hat`, operator output, or acceptance criteria, read this file
+before making recommendations or code changes.
 
-It is not an operator runbook and it is not a live-trading design. For run
-commands, status checks, logs, and local supervision, use:
+## Source Of Truth
 
-- `docs/operator_runbook.md`
-- `docs/local_process_supervision.md`
+- Active strategy consensus: this file.
+- Operator commands: `docs/operator_runbook.md`.
+- Local supervision: `docs/local_process_supervision.md`.
+- Current task surface: `docs/project_notes/current_task.md`.
+
+Do not infer current strategy behavior from older phase notes.
+
+## Current Purpose
+
+The current goal is to run local paper trading for BTC 15-minute Up/Down
+Polymarket sessions, then use recorded paper results for review and future
+strategy decisions.
+
+This is not a live-trading design. The bot does not place real orders, use
+wallet signing, or move real funds.
+
+Each BTC 15-minute market should be treated as one independent paper-trade
+record. The long-term review source should be a minimal local ledger with one
+row per market, not only end-of-run artifacts.
 
 ## Current Strategy In One Paragraph
 
-The bot watches a 15-minute BTC Up/Down Polymarket session. It records the BTC
-price at the market open, waits until the market has either 4 minutes or 3
-minutes left, then compares the current BTC price with the recorded open price.
-If BTC has moved at least `0.05%`, the bot creates a directional signal in the
-same direction as the move. After that, it checks whether the matching
-Polymarket UP or DOWN token is actually tradable at the ask side with the fixed
-paper stake. If the executable ask price is worse than the caller-supplied
-`p_hat`, the bot skips the paper trade instead of pretending the signal was
-tradable.
+The bot watches a BTC 15-minute Up/Down Polymarket session. It records the BTC
+price at market open. When the market enters the final configurable observation
+window, defaulting to the last 300 seconds, it continuously observes BTC price
+movement from that open price. If the absolute move reaches the configured
+threshold, defaulting to `0.05%`, the bot creates one directional signal in the
+same direction as the move. After a signal exists, it checks whether the matching
+UP or DOWN token is tradable at real ask-side depth with the fixed paper stake.
+An optional `p_hat` marketability filter may reject trades whose executable ask
+price is too expensive. The bot then records the paper trade or skip reason and
+later scores the paper result from public resolution data when available.
 
-## Strategy Parameters
+## Current Parameters
 
-These are the current parameters that directly affect the strategy decision or
-paper trade decision:
+These are the current parameters that directly affect strategy or paper-trade
+decisions. They are intended to be configurable through the active YAML task.
 
-| Parameter | Current value | Meaning |
+| Parameter | Current default | Meaning |
 | --- | ---: | --- |
 | Market type | BTC Up/Down | Only BTC binary direction markets are in scope. |
 | Market duration | 15 minutes | The root strategy is calibrated around 15-minute sessions. |
-| Entry remaining time | `240` or `180` seconds | Evaluate the signal when the market has 4 or 3 minutes left. |
-| Entry tolerance | `3` seconds | Small scheduling tolerance around the entry timestamp. |
+| Observation window start | `300` seconds remaining | Start continuous signal observation when the market has 5 minutes left. |
 | Move threshold | `0.05%` | BTC must move at least this far from market open to create a signal. |
+| Max entries per market | `1` | The first valid threshold crossing can create one paper entry. |
 | Paper stake | `9` USDC-equivalent | Fixed simulated spend per accepted paper trade. |
-| `p_hat` | `0.55` | Caller-supplied win-probability input; not a model. |
+| `p_hat` filter | enabled | Optional marketability filter, not part of the root signal. |
+| `p_hat` value | `0.55` | Caller-supplied win-probability input when the filter is enabled. |
 | Open-price capture window | `8` seconds | Time budget to capture BTC trades around market open. |
 | Max open-price delay | `5` seconds | The open price must be fresh enough after market start. |
-| Runner capture window | `8` seconds | Time budget to capture the entry-time BTC/orderbook data. |
-| Heartbeat interval | `30` seconds | Local runtime status heartbeat, not price polling. |
+| Observation tick | `1` second | Intended cadence for checking threshold crossing inside the window. |
+| Runner capture window | `8` seconds | Time budget to capture entry-time BTC/orderbook data. |
+| Heartbeat interval | `30` seconds | Local runtime status heartbeat, not terminal spam. |
 
 ## Step By Step Logic
 
@@ -52,44 +74,37 @@ The current search phrase is:
 bitcoin up down 15m
 ```
 
-The bot only proceeds when it can identify one valid next session and map the
-UP and DOWN token ids unambiguously. If the public metadata is missing,
-ambiguous, closed, archived, or not accepting orders, the bot records a skip
-reason and does not guess.
+The bot proceeds only when it can identify one valid next session and map the UP
+and DOWN token ids unambiguously. If the public metadata is missing, ambiguous,
+closed, archived, or not accepting orders, the bot records a skip reason and
+does not guess.
 
 ### 2. Record The BTC Open Price
 
-At the selected market's start time, the bot captures BTC trade data from the
-Binance WebSocket.
+At the selected market's start time, the bot should use a Polymarket-aligned
+open/reference price when that public source is available.
 
-The open price is the first valid BTC trade price after the market start. If the
-bot cannot capture a valid fresh post-start price, it skips that session. This
-matters because every later signal compares against this open price.
+If a Polymarket-aligned open/reference price is not available from public data,
+the bot may use a clearly labeled fallback source. The fallback source must be
+recorded; it must not be presented as a Polymarket open price. Every later
+signal compares against the recorded open price and its source.
 
-### 3. Wait For The Entry Moment
+### 3. Start The Observation Window
 
-The strategy does not evaluate continuously. It waits for one of the configured
-entry moments:
-
-```text
-4 minutes remaining
-3 minutes remaining
-```
-
-Those are represented as:
+The strategy observes continuously during the final configurable window of the
+15-minute market. The current default is:
 
 ```text
-240 seconds
-180 seconds
+observe_start_remaining_seconds = 300
 ```
 
-If the bot cannot reach one of those moments within the wait budget, or wakes up
-outside the allowed tolerance, the session is skipped.
+Human reading: when the market has 5 minutes left, start watching BTC movement
+from the recorded open price.
 
-### 4. Measure BTC Movement From Open
+### 4. Watch For A Threshold Crossing
 
-At the entry moment, the bot compares the current BTC price with the recorded
-market-open BTC price:
+During the observation window, the bot repeatedly compares current BTC price
+with the recorded market-open BTC price:
 
 ```text
 move_pct = (current_btc_price - open_btc_price) / open_btc_price * 100
@@ -99,15 +114,19 @@ Human reading:
 
 - `move_pct` is positive when BTC is above the market-open price.
 - `move_pct` is negative when BTC is below the market-open price.
-- The absolute size of `move_pct` must be at least `0.05%`.
+- The absolute size of `move_pct` must reach the configured threshold.
 
-### 5. Create The Root Signal
+### 5. Create One Root Signal
 
 The signal rule is deliberately small:
 
-- If BTC is up by at least `0.05%`, signal `UP`.
-- If BTC is down by at least `0.05%`, signal `DOWN`.
-- If BTC moved less than `0.05%` in either direction, signal `NO_SIGNAL`.
+- If BTC is up by at least the threshold, signal `UP`.
+- If BTC is down by at least the threshold, signal `DOWN`.
+- If BTC never reaches the threshold before the market ends, signal `NO_SIGNAL`
+  and do not enter.
+
+The first valid threshold crossing creates at most one paper entry for that
+market.
 
 The signal step does not look at Polymarket ask prices, liquidity, `p_hat`,
 Kelly, paper PnL, wallet state, or execution details. It only answers: "Has BTC
@@ -126,9 +145,8 @@ Only after the root signal exists does the runner choose a Polymarket token:
 A valid signal is not automatically a paper trade. The bot next checks the
 selected token's real ask-side order book.
 
-It simulates spending the fixed paper stake (`9`) against the cheapest available
-asks first. This gives the executable average ask price for the whole simulated
-fill.
+It simulates spending the fixed paper stake against the cheapest available asks
+first. This gives the executable average ask price for the whole simulated fill.
 
 The paper trade is rejected when:
 
@@ -137,15 +155,15 @@ The paper trade is rejected when:
 - the selected token id is missing
 - the Polymarket book cannot be captured
 
-This keeps the result honest: a correct signal still counts as untradable if
-the public order book cannot support the simulated buy.
+This keeps the result honest: a correct signal still counts as untradable if the
+public order book cannot support the simulated buy.
 
-### 8. Apply The `p_hat` Edge Check
+### 8. Optionally Apply The `p_hat` Filter
 
-The current `p_hat` is supplied by the caller as `0.55`. It is not trained,
-inferred, smoothed, or backfilled by the bot.
+`p_hat` is a caller-supplied marketability filter. It is not trained, inferred,
+smoothed, or backfilled by the bot.
 
-The edge check is:
+When the filter is enabled, the edge check is:
 
 ```text
 trade_edge = p_hat - executable_avg_ask
@@ -157,15 +175,12 @@ The paper trade is accepted only when:
 - `trade_edge` is greater than `0`
 - the fixed paper stake can be filled from ask depth
 
-Example:
+When the filter is disabled, the bot still requires a valid signal, mapped
+token, and sufficient ask depth. It simply does not reject the trade because of
+missing or non-positive `p_hat` edge.
 
-- If `p_hat = 0.55` and executable average ask is `0.52`, edge is positive, so
-  the paper trade can be accepted.
-- If `p_hat = 0.55` and executable average ask is `0.58`, edge is negative, so
-  the bot skips the paper trade.
-
-Kelly may be recorded as a reference value, but it does not size the current
-paper stake.
+Kelly may be recorded as a reference value when `p_hat` is enabled, but it does
+not size the current paper stake.
 
 ### 9. Resolve And Score Paper Results
 
@@ -185,24 +200,44 @@ If public resolution is ambiguous, disputed, not closed, non-binary, or missing
 clean terminal prices, the bot records a skip reason instead of inferring the
 winner.
 
+## Minimal Review Ledger
+
+The local paper system should keep one minimal record per 15-minute market so a
+future review can use however many markets have completed so far.
+
+The ledger should support these questions without storing raw market noise:
+
+- overall win rate over a period
+- total paper PnL over a period
+- simulated equity and return percentage from a configurable initial bankroll,
+  defaulting to `1000`
+- failure conditions, especially remaining time, move percentage, threshold,
+  side, price source, and skip reason
+
+The ledger should not store raw WebSocket ticks, full order books, full public
+payloads, or UI-oriented details.
+
+The simulated bankroll is accounting-only. It must not change signal generation,
+stake sizing, marketability, or paper fill behavior unless Planning explicitly
+approves a sizing rule later.
+
 ## What The Strategy Does Not Do
 
 The current logic intentionally does not include:
 
-- live orders, wallet signing, or real funds
+- live orders, wallet signing, account API usage, or real funds
 - a trained `p_hat` model
-- stop-loss, take-profit, averaging, reversal, or multi-entry rules
+- stop-loss, take-profit, averaging, reversal, grid, or multi-entry rules
 - midpoint, last-trade, or spread-based edge checks
-- continuous price polling as the signal engine
-- database storage or cloud deployment assumptions
+- cloud database or cloud deployment assumptions
 
 ## Required Result Split
 
 Reviews must keep these two views separate:
 
 - Signal-only view: whether the root BTC direction signal was right.
-- Tradable-signal view: whether that signal could pass ask-depth and edge
-  checks as a paper trade.
+- Tradable-signal view: whether that signal could pass ask-depth and optional
+  `p_hat` filtering as a paper trade.
 
 This split is important because a good or bad directional signal should not be
 hidden by marketability failures, and an untradable signal should not be counted

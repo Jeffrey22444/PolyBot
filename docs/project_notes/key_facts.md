@@ -3,8 +3,7 @@
 ## Stable Facts
 
 - Workspace root: `/Users/jeffrey/Documents/PolyBot`
-- Product consensus baseline: `docs/product_consensus/polymarket_paper_trader_v1.md`
-- Current strategy logic-chain consensus: `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Current strategy consensus: `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
 - Architecture doc: `docs/architecture.md`
 - Implementation plan: `docs/implementation-plan.md`
 - Project note directory: `docs/project_notes`

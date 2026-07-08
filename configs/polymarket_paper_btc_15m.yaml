@@ -1,0 +1,43 @@
+strategy:
+  market_type: "btc_up_down_15m"
+  observe_start_remaining_seconds: 300
+  move_threshold_pct: 0.05
+  max_entries_per_market: 1
+
+paper:
+  stake: 9
+  initial_bankroll: 1000
+  ledger_path: "data/paper_trades.sqlite3"
+
+marketability:
+  p_hat_filter_enabled: false
+  p_hat: 0.55
+
+discovery:
+  search_query: "bitcoin up down 15m"
+  mode: "next"
+  max_pages: 10
+  limit: 100
+  lookahead_minutes: 90
+
+timing:
+  max_wait_to_open_seconds: 900
+  max_wait_to_observation_seconds: 900
+  max_open_price_delay_seconds: 5
+
+capture:
+  open_price_seconds: 8
+  capture_limit: 5
+  observation_tick_seconds: 1
+  runner_seconds: 8
+
+runtime:
+  max_sessions: 96
+  max_runtime_seconds: 90000
+  retry_limit: 1
+  retry_backoff_seconds: 5
+  heartbeat_interval_seconds: 30
+
+operator_output:
+  enabled: true
+  format: "text"

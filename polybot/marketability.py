@@ -74,6 +74,7 @@ def evaluate_marketability(
     market_record: CaptureRecord,
     stake: float,
     caller_supplied_p_hat: float | None,
+    p_hat_filter_enabled: bool = True,
 ) -> PaperTradeRecord | SkippedTradeRecord:
     if signal not in (Signal.UP, Signal.DOWN):
         return SkippedTradeRecord(signal, "no_valid_signal", stake)
@@ -81,6 +82,17 @@ def evaluate_marketability(
     fill = simulate_ask_depth_fill(ask_levels_from_market_record(market_record), stake)
     if fill.rejected:
         return SkippedTradeRecord(signal, fill.skip_reason or "fill_rejected", stake)
+
+    if not p_hat_filter_enabled:
+        return PaperTradeRecord(
+            signal=signal,
+            stake=stake,
+            shares=fill.shares,
+            executable_avg_ask=fill.executable_avg_ask,
+            caller_supplied_p_hat=caller_supplied_p_hat,
+            trade_edge=None,
+            kelly_fraction_reference=None,
+        )
 
     if caller_supplied_p_hat is None:
         return SkippedTradeRecord(signal, "missing_p_hat", stake, fill.executable_avg_ask)
@@ -158,6 +170,11 @@ def _self_check() -> dict[str, object]:
     assert accepted.signal == Signal.UP
     assert round(accepted.trade_edge, 6) == round(0.55 - accepted.executable_avg_ask, 6)
 
+    no_p_hat_filter = evaluate_marketability(Signal.UP, record, 9.0, None, p_hat_filter_enabled=False)
+    assert isinstance(no_p_hat_filter, PaperTradeRecord)
+    assert no_p_hat_filter.caller_supplied_p_hat is None
+    assert no_p_hat_filter.trade_edge is None
+
     signal_report = signal_only_report(
         [
             PaperSignalRecord(
@@ -177,6 +194,7 @@ def _self_check() -> dict[str, object]:
         "insufficient_depth_skip_reason": insufficient.skip_reason,
         "missing_p_hat_skip_reason": missing_p_hat.skip_reason,
         "missing_p_hat_trade_edge": missing_p_hat.trade_edge,
+        "p_hat_filter_disabled_filled": isinstance(no_p_hat_filter, PaperTradeRecord),
         "signal_after_rejection": rejected.signal.value,
         "signal_only": signal_report,
         "tradable_signal": tradable_report,
