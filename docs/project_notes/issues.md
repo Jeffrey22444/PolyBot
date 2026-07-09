@@ -2,13 +2,539 @@
 
 ## Current Summary
 
-- Current phase: minimal trade ledger and Polymarket-open execution complete; ready for separate acceptance if requested
-- Current recommended next task: review `polybot-paper-minimal-trade-ledger-and-polymarket-open`
-- Latest accepted slice: Phase 23 local process supervision
+- Current phase: pending resolution retry and 5% equity stake remediation complete; ready for separate `验收区` if requested
+- Current recommended next task: review `polybot-paper-pending-resolution-retry-and-equity-stake`
+- Latest accepted slice: Beijing-day rolling paper run and per-session settlement
 - Open blockers: none for planning; final `p_hat` model and live trading remain explicit future product decisions outside this config/operator UX task
-- Last updated: 2026-07-08
+- Last updated: 2026-07-09
 
 ## Log
+
+### 2026-07-09 - Move Threshold Raised To 0.15 Percent
+
+任务ID：
+polybot-paper-move-threshold-015
+
+改动文件：
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Added `polybot/runtime_config.py`
+- Updated `polybot/signal.py`
+- Updated `polybot/paper_runner.py`
+- Updated `polybot/e2e_dry_run.py`
+- Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Kept the current strategy rule the same and only changed the active move threshold to `0.15%`.
+- Removed code-level threshold fallback constants; active default threshold now comes from `configs/polymarket_paper_btc_15m.yaml`.
+- Synced the active config, active strategy consensus doc, local supervision doc, and threshold-loading code paths.
+- Updated self-check fixtures so the YAML-driven threshold path still proves `UP`, `DOWN`, and `NO_SIGNAL` outcomes.
+- Did not rewrite historical logs/archive docs that mention older thresholds.
+
+运行命令：
+- `python3 -m polybot.signal`
+- `python3 -m polybot.paper_runner --self-check`
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `rg -n "DEFAULT_MOVE_THRESHOLD_PCT|move_threshold_pct: float =|default=0\\.15|default=0\\.05|\\\"move_threshold_pct\\\": 0\\.(05|15)|move_threshold_pct=0\\.(05|15)" polybot`
+
+结果：
+- All three self-check commands passed.
+- Active config remains `configs/polymarket_paper_btc_15m.yaml: move_threshold_pct: 0.15`.
+- Code search found no remaining hardcoded move-threshold default in `polybot/`.
+- Active runtime threshold now resolves from YAML in `polybot/runtime_config.py`.
+- Remaining `0.05%` mentions are stake-fraction text or historical records, not live move-threshold defaults.
+
+手工检查：
+- `polybot.signal` no longer carries a built-in move-threshold default; callers must pass the threshold explicitly.
+- `polybot.paper_runner` no longer hardcodes a CLI move-threshold default; it falls back to session config, then the canonical YAML config.
+- `polybot.e2e_dry_run` no longer hardcodes `strategy.move_threshold_pct`; its default path reads the canonical YAML config.
+- `docs/operator_runbook.md` did not state a numeric threshold, so no sync edit was required there.
+
+范围外未做：
+- Did not change entry timing, stake sizing, `p_hat`, marketability, fill rules, resolution behavior, ledger schema, or archive/history notes.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Pending Resolution Retry And Equity Stake Remediation
+
+任务ID：
+polybot-paper-pending-resolution-retry-and-equity-stake
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `polybot/trade_ledger.py`
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Restored the required `paper.stake: null` plus `paper.stake_fraction: 0.05` default in `configs/polymarket_paper_btc_15m.yaml`.
+- Added `--stake-fraction` back to `polybot.e2e_dry_run --help`.
+- Default stake now computes as `current settled simulated equity * stake_fraction`; `--paper-stake` remains a fixed manual override.
+- Added `trade_ledger.current_equity(...)` and `trade_ledger.equity_fraction_stake(...)` without changing the SQLite schema.
+- Added `pending_ledger_resolution_retry(...)`, called on startup, after each session, and during final/interrupted close through `refresh_resolution(...)`.
+- PENDING retry uses Polymarket public market metadata by `market_id`; clear closed metadata settles opened rows to `WIN`/`LOSS`, while not-closed or unclear metadata leaves rows `PENDING`.
+- Restored docs for the 5% settled-equity default stake and PENDING retry behavior.
+- Reverted non-task threshold/timing drift in the operator config/docs so this remediation does not change signal threshold or wait budget.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `python3 -m polybot.trade_ledger --self-check`
+- `python3 -m polybot.resolution_ingestion --self-check`
+- `python3 -m polybot.supervisor_results --self-check`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `rg -n "stake_fraction|paper_stake_for_session|pending_ledger_resolution_retry|pending_retry|--stake-fraction|pending_resolution_retry|equity_fraction_stake" polybot/e2e_dry_run.py polybot/trade_ledger.py configs/polymarket_paper_btc_15m.yaml docs/operator_runbook.md docs/local_process_supervision.md docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- `git diff -- polybot/e2e_dry_run.py polybot/trade_ledger.py configs/polymarket_paper_btc_15m.yaml docs/operator_runbook.md docs/local_process_supervision.md docs/product_consensus/polymarket_paper_trader_logic_chain.md | rg -n "CREATE TABLE|ALTER TABLE|wallet|signing|order placement|live order|p_hat model|trained p_hat|training|cloud deployment|root/system|LaunchDaemon|machine restart|restart policy"`
+- `git diff -- configs/polymarket_paper_btc_15m.yaml docs/local_process_supervision.md docs/product_consensus/polymarket_paper_trader_logic_chain.md | rg -n "move_threshold_pct|Move threshold|0\\.15|0\\.05% threshold|0\\.05%"`
+
+结果：
+- All required self-check, help, shell syntax, compile, and whitespace checks passed.
+- `e2e_dry_run --help` now exposes `--stake-fraction`.
+- `e2e_dry_run --self-check` now asserts:
+  - initial equity `1000` and `stake_fraction 0.05` produce stake `50`
+  - settled `+11` PnL changes the next default stake to `50.55`
+  - an opened `PENDING` row with clear public resolution updates to `WIN`
+  - an opened `PENDING` row with not-closed public metadata remains `PENDING`
+- Symbol search confirms the required stake and pending-retry implementation surfaces are present.
+- Forbidden diff search returned no matches for schema changes, live trading, wallet/signing, `p_hat` model/training, cloud deployment, root/system service, or machine restart policy.
+- Threshold check shows the task-touched config/docs are at `0.05`; no `0.15` threshold drift remains.
+
+手工检查：
+- `configs/polymarket_paper_btc_15m.yaml` documents `stake_fraction` as the manual percentage knob for default entry size.
+- `docs/operator_runbook.md`, `docs/local_process_supervision.md`, and product consensus now describe 5% settled-equity stake and PENDING retry behavior.
+- Concise Terminal output changes remain in place but were not used to alter stake, PnL, resolution policy, or artifact semantics.
+
+范围外未做：
+- Did not change signal logic, observation window, open-price freshness, marketability/fill rules, PnL formula, resolution conservatism, ledger schema, dependency set, live trading, wallet/signing, or cloud/process-manager behavior.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Concise Terminal Historical Replay Fix
+
+任务ID：
+polybot-paper-concise-terminal-output
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Fixed the remaining Terminal spam: each launcher retry started a fresh Python process, then `refresh_resolution(...)` summarized the whole daily `supervisor.jsonl` and reprinted old `NO_BET` / `PENDING` lines.
+- Added `current_report_market_ids(...)`.
+- Limited `refresh_resolution(...)` Terminal result emission to market IDs processed by the current process.
+- Kept full daily summary, ledger update, full logs, raw artifacts, status, heartbeat, and session index behavior intact.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+
+结果：
+- All commands passed.
+- Self-check now covers `current_report_market_ids(...)`.
+
+手工检查：
+- Existing concise line helpers still omit `market_id=`.
+- The old running process must be restarted once to load this fix.
+
+范围外未做：
+- Did not change strategy, stake sizing, pending retry, resolution rules, ledger schema, artifact semantics, or full log retention.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Concise Terminal Output Remediation
+
+任务ID：
+polybot-paper-concise-terminal-output
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `polybot/trade_ledger.py`
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Removed the out-of-scope stake-fraction and pending-ledger-retry changes from the current diff after acceptance found them mixed into the concise-output task surface.
+- Restored fixed `paper.stake` behavior and removed `--stake-fraction` from `polybot.e2e_dry_run`.
+- Removed pending-ledger-retry helper, runtime wiring, self-check fixture, and docs wording from the concise-output diff.
+- Kept the concise Terminal output changes and launcher full-log filter fix.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `python3 -m polybot.trade_ledger --self-check`
+- launcher awk fixture using `/private/tmp/polybot-terminal-filter.log` and `/private/tmp/polybot-terminal-filter.out`
+- `rg -n "stake_fraction|paper_stake_for_session|pending_ledger_resolution_retry|pending_retry|GAMMA_MARKETS_URL|equity_fraction|--stake-fraction|current settled simulated equity|retry existing ledger|retries existing ledger|PENDING.*retry" polybot/e2e_dry_run.py polybot/trade_ledger.py configs/polymarket_paper_btc_15m.yaml docs/operator_runbook.md docs/local_process_supervision.md docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- `rg -n "\\[(RUN_START|TRADE|SKIP|RESULT)\\]|market_id=|candidate snapshots|raw diagnostics|full JSON|URL" polybot/e2e_dry_run.py scripts/paper_btc_15m_launch.sh docs/operator_runbook.md docs/local_process_supervision.md`
+
+结果：
+- All self-check, help, shell syntax, compile, and whitespace checks passed.
+- `python3 -m polybot.e2e_dry_run --help` no longer exposes `--stake-fraction`.
+- Stake/pending-retry residual search returned no matches in the task-touched code/config/docs surfaces.
+- Launcher awk fixture confirmed Terminal output keeps only concise lines while full log retains the raw JSON line with `market_id` and URL.
+- Terminal-surface search found no old `[RUN_START]`, `[TRADE]`, `[SKIP]`, or `[RESULT]` tags; remaining `market_id`/URL matches are internal data paths, docs explaining what Terminal avoids, and the self-check assertion.
+
+手工检查：
+- `rg` confirmed no remaining `stake_fraction`, pending-retry helper, `--stake-fraction`, or pending-retry documentation in the concise-output touched surfaces.
+
+范围外未做：
+- Did not change strategy threshold, observation window, market selection, open-price rule, paper stake, PnL, pending retry, conservative resolution boundary, ledger schema, artifact format, dependency, process manager, or UI behavior beyond concise Terminal output.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Concise Terminal Output Execution
+
+任务ID：
+polybot-paper-concise-terminal-output
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `scripts/paper_btc_15m_launch.sh`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/bugs.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Replaced verbose operator lines with concise Terminal tags: `[RUN]`, `[WATCH]`, `[BET]`, `[NO_BET]`, `[SETTLED]`, and `[PENDING]`.
+- Terminal output now shows the watched Beijing-time 15m window, bet direction/stake/avg/shares/move, no-bet reason, settlement PnL/equity, or pending resolution status.
+- Concise operator lines no longer print `market_id=`, long slugs, full JSON, URLs, candidate snapshots, or raw diagnostics.
+- Launcher awk filtering now only passes `[START]`, `[RETRY]`, `[STOP]`, and the concise operator tags to Terminal.
+- Fixed the launcher full-log write path by renaming the awk variable from `log` to `logfile`; `log` conflicts with awk's built-in `log()` function.
+- Full stdout/stderr still writes to `runs/paper-btc-15m-logs/<UTC timestamp>.log`; artifacts and machine JSON remain unchanged.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- launcher awk fixture using `/private/tmp/polybot-terminal-filter.log` and `/private/tmp/polybot-terminal-filter.out`
+- `rg -n "\\[(RUN_START|TRADE|SKIP|RESULT)\\]|market_id=|candidate snapshots|raw diagnostics|full JSON|URL" polybot/e2e_dry_run.py scripts/paper_btc_15m_launch.sh docs/operator_runbook.md docs/local_process_supervision.md`
+
+结果：
+- All required self-check, help, shell syntax, compile, and whitespace checks passed.
+- `e2e_dry_run --self-check` now asserts concise `[WATCH]`, `[BET]`, `[NO_BET]`, `[SETTLED]`, and `[PENDING]` formats and confirms they do not contain `market_id=`.
+- Launcher awk fixture confirmed Terminal output keeps only concise `[WATCH]` and `[BET]` lines while the log file still contains the raw JSON line with `market_id` and URL.
+- Search found no old `[RUN_START]`, `[TRADE]`, `[SKIP]`, or `[RESULT]` tags in the edited operator surfaces. Remaining `market_id`/URL matches are internal data paths, docs explaining what Terminal avoids, and the self-check assertion.
+
+手工检查：
+- `docs/operator_runbook.md` example output now shows concise user-facing lines without `market_id`.
+- `docs/local_process_supervision.md` now states Terminal is filtered while full stdout/stderr remains in the log file.
+- `docs/project_notes/bugs.md` records the reusable awk variable-name pitfall.
+
+范围外未做：
+- No strategy threshold, observation window, market selection, open-price rule, paper stake, PnL, pending retry, conservative resolution boundary, ledger schema, artifact format, dependency, process manager, or UI behavior was changed.
+- Did not remove raw JSON artifacts, full logs, status, heartbeat, session index, or SQLite fields.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Pending Resolution Retry And Equity Stake Execution
+
+任务ID：
+polybot-paper-pending-resolution-retry-and-equity-stake
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `polybot/trade_ledger.py`
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Added default stake sizing as `current settled simulated equity * paper.stake_fraction`; YAML default is now `stake: null` and `stake_fraction: 0.05`, so initial equity `1000` yields first stake `50`.
+- Documented in `configs/polymarket_paper_btc_15m.yaml` that `stake_fraction` is the manual percentage knob for how much settled simulated account equity to use per new paper entry; `stake` remains the fixed manual amount override.
+- Kept `--paper-stake` as a manual fixed-stake override for a run.
+- Added ledger equity/stake helpers without changing the SQLite schema.
+- Added startup, per-session, and final/interrupted `PENDING` retry through the existing conservative public resolution ingestion path.
+- `PENDING` retry queries public market metadata by `market_id`; clear UP/DOWN metadata settles opened ledger rows to `WIN` or `LOSS`, while unclear/not-closed metadata leaves them `PENDING`.
+- Did not infer settlement from frontend display text or BTC close movement.
+- Updated product consensus, operator runbook, and local-supervision docs to describe 5% settled-equity stake, `PENDING` retry behavior, and `p_hat` as caller-supplied.
+
+运行命令：
+- `python3 -m polybot.trade_ledger --self-check`
+- `python3 -m polybot.resolution_ingestion --self-check`
+- `python3 -m polybot.supervisor_results --self-check`
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `python3 -m polybot.long_run --help`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `git diff --check`
+- `git diff -- polybot configs scripts | rg -n "wallet|signing|order placement|live order|p_hat model|trained p_hat|training|cloud deployment|root/system|LaunchDaemon|system daemon|machine restart|restart policy|CREATE TABLE|ALTER TABLE"`
+- `git diff -- docs/product_consensus/polymarket_paper_trader_logic_chain.md docs/operator_runbook.md docs/local_process_supervision.md | rg -n "wallet|signing|order placement|p_hat.*model|model.*p_hat|training|cloud deployment|root/system|LaunchDaemon|machine restart|restart policy"`
+
+结果：
+- All required self-check, help, compile, launcher syntax, and whitespace checks passed.
+- Forbidden diff searches returned no matches in code/config/scripts and no matches in the edited docs for the listed forbidden terms.
+- `e2e_dry_run --self-check` now also asserts:
+  - initial equity `1000` and `stake_fraction 0.05` produce stake `50`
+  - settled `+11` PnL changes the next default stake to `50.55`
+  - an opened `PENDING` row with clear public resolution updates to `WIN`
+  - an opened `PENDING` row with not-closed public metadata remains `PENDING`
+- `trade_ledger --self-check` now asserts current equity and equity-fraction stake calculation while preserving the existing schema guard.
+
+范围外未做：
+- No live trading, wallet/signing, credential, order-placement, cloud deployment, root/system service, machine restart policy, trained `p_hat` model, Kelly sizing, new dependency, new storage service, or ledger schema change was added.
+- Did not change signal logic, open-price freshness, marketability/fill rules, PnL formula, resolution policy, or runner behavior beyond choosing the configured stake value.
+- Existing unrelated worktree changes from earlier tasks remain and were not reverted.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Concise Terminal Output Task Ready
+
+任务ID：
+polybot-paper-concise-terminal-output
+
+规划结论：
+- User wants daily Terminal output to be simpler than the current operator stream.
+- Terminal should focus on the watched 15m time range, bet details, entry/average price, and settlement status.
+- Terminal should not show `market_id`, long slugs, full JSON, URLs, candidate snapshots, or raw diagnostics.
+- Full logs and JSON artifacts must remain available for debugging and later review.
+- This is a small standalone execution task and does not need Goal mode.
+
+Active task:
+- `docs/project_notes/current_task.md`
+- `polybot-paper-concise-terminal-output`
+
+Deferred planned task:
+- `polybot-paper-pending-resolution-retry-and-equity-stake` remains planned but is no longer the active task card.
+
+Scope skipped:
+- No production code changed by planning.
+- No strategy, stake sizing, pending retry, resolution, ledger, artifact, or process-management behavior was changed by planning.
+
+### 2026-07-09 - Pending Resolution Retry And Equity Stake Task Ready
+
+任务ID：
+polybot-paper-pending-resolution-retry-and-equity-stake
+
+规划结论：
+- `PENDING` means a paper trade exists but public Polymarket resolution metadata is not yet clear enough for conservative `WIN`/`LOSS`.
+- Next execution should retry existing `PENDING` ledger rows on startup, after sessions, and at finalize/interruption using the existing public resolution path.
+- If public metadata remains unclear, keep the trade `PENDING`; do not infer from frontend display or local BTC close price in this slice.
+- Default paper stake should become 5% of current settled simulated equity.
+- Current equity means `initial_bankroll + settled WIN/LOSS cumulative PnL`; pending/unsettled PnL does not affect the next stake.
+- With `initial_bankroll: 1000`, the first default stake should be `50`.
+
+Active task:
+- `docs/project_notes/current_task.md`
+- `polybot-paper-pending-resolution-retry-and-equity-stake`
+
+Scope skipped:
+- No production code changed by planning.
+- No local-inferred settlement, Kelly sizing, p_hat model, live trading, new dependency, new database, or ledger schema change was planned as required behavior.
+
+### 2026-07-08 - Beijing-Day Rolling Run Acceptance
+
+任务ID：
+polybot-paper-beijing-day-rollover-settlement
+
+验收结论：
+- 通过
+
+关键证据：
+- `current_task.md` 的 Acceptance Contract 要求按北京时间自然日滚动、session 后与中断时尝试保守结算、保留单一 SQLite ledger，见 `docs/project_notes/current_task.md`。
+- 最新执行证据块完整覆盖本任务范围、命令和结果，见上方 `Beijing-Day Rolling Run Execution` 记录。
+- 复核 `python3 -m polybot.e2e_dry_run --self-check`、`python3 -m polybot.trade_ledger --self-check`、`python3 -m polybot.long_run --self-check`、`python3 -m polybot.resolution_ingestion --self-check`、`python3 -m polybot.supervisor_results --self-check`、`python3 -m polybot.e2e_dry_run --help`、`PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`、`git diff --check`、`bash -n scripts/paper_btc_15m_launch.sh`，均通过。
+- `polybot/e2e_dry_run.py` 已新增北京时间日期辅助函数、日切目录解析、共享 finalize 路径，以及 session 后立即刷新 conservative resolution 的路径；self-check 覆盖了北京时间切日、closed 写入 `WIN`、not-closed 保持 `PENDING`、以及 interrupted 收尾 artifacts 可读。
+- `python3 -m polybot.e2e_dry_run --help` 现在明确为 `Beijing-day rolling`，并把 `--max-sessions` 标注为 `safety cap; normal run boundary is Beijing midnight`。
+- 启动脚本与操作文档都已改成北京时间日期目录：`runs/paper-btc-15m/<Beijing YYYY-MM-DD>/`；ledger 仍为单一 `data/paper_trades.sqlite3`。
+
+发现：
+- 当前 worktree 仍带有本任务之外的旧 diff：`polybot/long_run.py`、`polybot/paper_runner.py`、`polybot/supervisor.py`。执行证据已注明这是未回退的旧任务残留，本次未发现它们阻塞本合同通过。
+- `configs/polymarket_paper_btc_15m.yaml` 当前 diff 里有 `move_threshold_pct: 0.25` 的现状，但本任务验收未发现本次实现去改动策略语义；按当前任务卡中的既有前提，将其视为既有工作树状态，不作为本次失败依据。
+
+### 2026-07-08 - Beijing-Day Rolling Run Execution
+
+任务ID：
+polybot-paper-beijing-day-rollover-settlement
+
+改动文件：
+- Updated `polybot/e2e_dry_run.py`
+- Updated `configs/polymarket_paper_btc_15m.yaml`
+- Updated `scripts/paper_btc_15m_launch.sh`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Added Beijing-day helpers in `e2e_dry_run.py` using existing stdlib timezone logic.
+- Default/no-explicit run directory now resolves to `runs/paper-btc-15m/<Beijing YYYY-MM-DD>`.
+- Date-named run directories roll over at Beijing midnight; if a selected session belongs to the next Beijing day, the current day is finalized and the next day directory is opened before processing it.
+- `max_sessions` remains a safety cap; normal boundary is Beijing midnight.
+- Each processed session now calls the existing conservative public resolution path immediately after the session, updating result output and the existing single SQLite ledger when resolution is available; unclear/not-closed sessions remain `PENDING`.
+- Finalization is shared by normal stop, day rollover, and `KeyboardInterrupt`, and writes `run_manifest.json`, `status.json`, `summary.json`, `session_index.json`, `heartbeat.jsonl`, and `dry_run_report.json`.
+- The launcher still execs `python3 -m polybot.e2e_dry_run --config ... --attempt-public-resolution --run-dir ...`, but now passes a Beijing date artifact directory.
+- The ledger remains one file at `data/paper_trades.sqlite3`; no ledger schema change was made.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.trade_ledger --self-check`
+- `python3 -m polybot.long_run --self-check`
+- `python3 -m polybot.resolution_ingestion --self-check`
+- `python3 -m polybot.supervisor_results --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `rg -n "UTC timestamp|max_sessions=96|max_sessions 96|96 sessions|96-session|reached_max_sessions|<UTC timestamp>" configs docs/operator_runbook.md docs/local_process_supervision.md polybot/e2e_dry_run.py scripts/paper_btc_15m_launch.sh`
+
+结果：
+- All required self-check commands passed.
+- `e2e_dry_run --self-check` now also asserts:
+  - `2026-07-08T15:59:00Z` maps to Beijing day `2026-07-08`
+  - `2026-07-08T16:00:00Z` maps to Beijing day `2026-07-09`
+  - next Beijing midnight after `2026-07-08T15:59:00Z` is `2026-07-08T16:00:00Z`
+  - closed fixture writes `WIN` into the ledger and not-closed fixture remains `PENDING`
+  - interrupted-equivalent finalization writes readable manifest and `dry_run_report.json`
+- `e2e_dry_run --help` now says this is a Beijing-day rolling dry run and labels `--max-sessions` as a safety cap whose normal boundary is Beijing midnight.
+- `compileall`, `git diff --check`, and launcher `bash -n` passed.
+- Stale wording search only found `UTC timestamp` for stdout/stderr log filenames, not artifact run directories.
+
+手工检查：
+- `configs/polymarket_paper_btc_15m.yaml` now comments that `runtime.max_sessions` is a safety cap only.
+- `docs/operator_runbook.md` uses `TZ=Asia/Shanghai date +%Y-%m-%d` for `RUN_DIR`.
+- `docs/local_process_supervision.md` describes artifacts as `runs/paper-btc-15m/<Beijing YYYY-MM-DD>/`.
+- No strategy, threshold, paper stake, PnL, `p_hat`, marketability, open-price source logic, ledger schema, dependency, daemon/service, cloud, wallet/signing, or live trading behavior was changed.
+- Existing uncommitted stale-runtime cleanup diff remains in the worktree and was not reverted.
+
+范围外未做：
+- Did not split the SQLite ledger by date.
+- Did not add a new database, new service, new daemon, new dependency, cloud storage, or live trading path.
+- Did not remove artifact/status/heartbeat/session-index/ledger writing.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-08 - Beijing-Day Rolling Run Task Ready
+
+任务ID：
+polybot-paper-beijing-day-rollover-settlement
+
+规划结论：
+- SQLite ledger continues as one compact `data/paper_trades.sqlite3` across dates.
+- Raw JSON artifacts should be split by Beijing calendar date, not mixed across days.
+- Normal run boundary should be Beijing natural day, not `max_sessions=96`.
+- Each completed session should attempt conservative public resolution; unclear/not-closed markets remain `PENDING`.
+- On user interruption, the current day run should attempt to close all ended pending sessions and write readable artifacts.
+- If the process is not interrupted, Beijing midnight should close the current day run and automatically start the next day's artifact directory.
+
+Active task:
+- `docs/project_notes/current_task.md`
+- `polybot-paper-beijing-day-rollover-settlement`
+
+Scope skipped:
+- No production code changed by planning.
+- No strategy, threshold, paper stake, PnL, `p_hat`, ledger schema, live trading, daemon, or storage-service behavior was changed by planning.
+
+### 2026-07-08 - Acceptance Write-Back Gap Noted
+
+任务ID：
+polybot-paper-remove-stale-runtime-surfaces
+
+记录：
+- User reported the stale runtime cleanup task should already have passed acceptance.
+- Planning searched project notes and found execution evidence for the task, but no matching acceptance result/write-back block in `docs/project_notes/issues.md`.
+- The likely process cause is that the acceptance result was returned in the `验收区` conversation but was not written back into the project log.
+- The old task card is now superseded by `polybot-paper-beijing-day-rollover-settlement`; if the exact acceptance proof is needed later, route a short read-only `验收区` pass to append the missing acceptance note.
+
+### 2026-07-08 - Stale Runtime Surface Cleanup Execution
+
+任务ID：
+polybot-paper-remove-stale-runtime-surfaces
+
+改动文件：
+- Deleted `polybot/supervisor.py`
+- Updated `polybot/paper_runner.py`
+- Updated `polybot/long_run.py`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Removed the old Phase 9 `polybot.supervisor` CLI file as one explicit file deletion.
+- Removed `paper_runner.capture_session(...)`, `paper_runner.run_once(...)`, and the old direct single-market CLI branch using `--polymarket-asset-id` / `--market-end-time`.
+- Kept `paper_runner.run_session_once(...)` and the session-config CLI path.
+- Changed `python3 -m polybot.paper_runner --self-check` to run the existing session runner self-check.
+- Removed unused `long_run.py` CLI-only arguments: `--continuous`, `--lookahead-minutes`, and `--runner-seconds`.
+- Did not change strategy rules, capture semantics, artifact/status/heartbeat/session-index writing, ledger schema, PnL semantics, open-price source logic, stake, or `p_hat` behavior.
+
+运行命令：
+- `python3 -m polybot.paper_runner --self-check`
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.long_run --self-check`
+- `python3 -m polybot.trade_ledger --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `python3 -m polybot.long_run --help`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `rg -n "run_supervisor|python3 -m polybot\\.supervisor|paper_runner\\.run_once|capture_session\\(|--continuous" polybot docs/operator_runbook.md docs/local_process_supervision.md scripts configs`
+
+结果：
+- All self-checks passed.
+- `e2e_dry_run --help` still exposes current main-entry parameters, including `--lookahead-minutes`, `--runner-seconds`, and `--heartbeat-interval-seconds`.
+- `long_run --help` no longer exposes `--continuous`, `--lookahead-minutes`, or `--runner-seconds`.
+- `paper_runner --help` no longer exposes `--polymarket-asset-id` or `--market-end-time`; old direct single-market mode is gone.
+- `compileall` passed.
+- `git diff --check` passed.
+- Required stale-surface search returned no matches.
+
+手工检查：
+- `scripts/paper_btc_15m_launch.sh` still execs `python3 -m polybot.e2e_dry_run --config "$REPO_DIR/configs/polymarket_paper_btc_15m.yaml" --attempt-public-resolution --run-dir "$RUN_DIR"`.
+- `polybot/e2e_dry_run.py` still imports/uses `run_session_once`, `build_run_artifacts`, `run_long_run`, and `trade_ledger`.
+- No current code imports `polybot.supervisor`; remaining `polybot.supervisor_results` imports are the retained result aggregation module.
+- `docs/operator_runbook.md` and `docs/local_process_supervision.md` did not require changes because they describe the current `e2e_dry_run` launcher/artifact path and do not recommend `polybot.supervisor` or the old `paper_runner` direct mode.
+- Ponytail result: deleted old surfaces; no replacement abstraction added.
+
+范围外未做：
+- Did not delete `polybot/long_run.py`, `polybot/run_artifacts.py`, `polybot/supervisor_results.py`, `polybot/market_data.py`, or `polybot/trade_ledger.py`.
+- Did not remove artifact/status/heartbeat/session-index/ledger writing.
+- Did not modify strategy, market data capture, ledger schema, PnL, open price, stake, `p_hat`, live trading, wallet/signing, deployment, or supervision behavior.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-08 - Stale Runtime Surface Cleanup Task Ready
+
+- Task ID: `polybot-paper-remove-stale-runtime-surfaces`
+- Planning review:
+  - Current launcher still starts `polybot.e2e_dry_run`; it does not call
+    `polybot.supervisor`.
+  - Current data collection/storage still depends on `run_session_once`,
+    `build_run_artifacts`, `run_long_run`, and `trade_ledger`.
+  - Therefore `polybot/long_run.py`, `polybot/run_artifacts.py`,
+    `polybot/supervisor_results.py`, `polybot/market_data.py`,
+    `polybot/trade_ledger.py`, artifact/status/heartbeat files, and
+    `e2e_dry_run` CLI override parameters must stay.
+  - Safe cleanup scope is limited to the old `polybot/supervisor.py` CLI,
+    the old direct single-market `paper_runner` mode, and unused
+    `long_run.py` CLI-only arguments.
+- Active task:
+  - `docs/project_notes/current_task.md`
+  - `polybot-paper-remove-stale-runtime-surfaces`
+- Scope skipped:
+  - No execution work performed by planning.
+  - No business code changed by planning.
 
 ### 2026-07-08 - Main Publish For Current Project State
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -16,14 +18,16 @@ from polybot.market_discovery import GAMMA_EVENTS_URL
 from polybot.market_discovery import discover_session, fetch_json, select_session
 from polybot.open_price import enrich_session_config
 from polybot.paper_runner import parse_datetime, run_session_once
-from polybot.resolution_ingestion import extract_market, ingest_metadata
+from polybot.resolution_ingestion import GAMMA_MARKETS_URL, extract_market, ingest_metadata
+from polybot.runtime_config import configured_move_threshold_pct
 from polybot.run_artifacts import build_run_artifacts, read_json, write_json
 from polybot.signal import Signal
 from polybot.supervisor_results import batch_close
-from polybot.trade_ledger import DEFAULT_LEDGER_PATH, record_result, rows as ledger_rows, upsert_trade
+from polybot.trade_ledger import DEFAULT_LEDGER_PATH, equity_fraction_stake, record_result, rows as ledger_rows, upsert_trade
 
 
 BEIJING_TZ = timezone(timedelta(hours=8), "CST")
+BEIJING_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -38,14 +42,47 @@ def records_to_jsonl(path: Path, records: list[CaptureRecord]) -> None:
         write_jsonl(path, records)
 
 
+def beijing_day_text(value: datetime | None = None) -> str:
+    return (value or datetime.now(timezone.utc)).astimezone(BEIJING_TZ).date().isoformat()
+
+
+def next_beijing_midnight(value: datetime | None = None) -> datetime:
+    local = (value or datetime.now(timezone.utc)).astimezone(BEIJING_TZ)
+    tomorrow = local.date() + timedelta(days=1)
+    return datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=BEIJING_TZ).astimezone(timezone.utc)
+
+
+def is_daily_run_dir(path: Path) -> bool:
+    return bool(BEIJING_DAY_RE.fullmatch(path.name))
+
+
+def resolve_run_dir(path: Path | None, now: datetime | None = None) -> Path:
+    if path is not None:
+        return path
+    return Path("runs/paper-btc-15m") / beijing_day_text(now)
+
+
+def update_latest_run_pointers(run_dir: Path) -> None:
+    if run_dir.parent.name != "paper-btc-15m":
+        return
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    (run_dir.parent / "latest_run_dir.txt").write_text(str(run_dir) + "\n", encoding="utf-8")
+    latest = run_dir.parent / "latest"
+    tmp = run_dir.parent / ".latest.tmp"
+    if tmp.exists() or tmp.is_symlink():
+        tmp.unlink()
+    tmp.symlink_to(run_dir.name, target_is_directory=True)
+    os.replace(tmp, latest)
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "strategy": {
         "market_type": "btc_up_down_15m",
         "observe_start_remaining_seconds": 300,
-        "move_threshold_pct": 0.05,
+        "move_threshold_pct": configured_move_threshold_pct(),
         "max_entries_per_market": 1,
     },
-    "paper": {"stake": 9.0, "initial_bankroll": 1000.0, "ledger_path": str(DEFAULT_LEDGER_PATH)},
+    "paper": {"stake": None, "stake_fraction": 0.05, "initial_bankroll": 1000.0, "ledger_path": str(DEFAULT_LEDGER_PATH)},
     "marketability": {"p_hat_filter_enabled": True, "p_hat": 0.55},
     "discovery": {
         "search_query": "bitcoin up down 15m",
@@ -95,6 +132,7 @@ CONFIG_ARG_MAP = {
     "retry_backoff_seconds": ("runtime", "retry_backoff_seconds"),
     "heartbeat_interval_seconds": ("runtime", "heartbeat_interval_seconds"),
     "paper_stake": ("paper", "stake"),
+    "stake_fraction": ("paper", "stake_fraction"),
     "initial_bankroll": ("paper", "initial_bankroll"),
     "ledger_path": ("paper", "ledger_path"),
     "p_hat": ("marketability", "p_hat"),
@@ -155,7 +193,8 @@ def apply_config(args: argparse.Namespace) -> argparse.Namespace:
     args.retry_limit = int(config["runtime"]["retry_limit"])
     args.retry_backoff_seconds = float(config["runtime"]["retry_backoff_seconds"])
     args.heartbeat_interval_seconds = float(config["runtime"]["heartbeat_interval_seconds"])
-    args.paper_stake = float(config["paper"]["stake"])
+    args.paper_stake = None if config["paper"]["stake"] is None else float(config["paper"]["stake"])
+    args.stake_fraction = float(config["paper"]["stake_fraction"])
     args.initial_bankroll = float(config["paper"]["initial_bankroll"])
     args.ledger_path = Path(config["paper"]["ledger_path"])
     args.p_hat = None if config["marketability"]["p_hat"] is None else float(config["marketability"]["p_hat"])
@@ -170,7 +209,8 @@ def apply_config(args: argparse.Namespace) -> argparse.Namespace:
 
 def validate_config(config: dict[str, Any]) -> None:
     checks = [
-        (float(config["paper"]["stake"]) > 0, "paper.stake must be > 0"),
+        (config["paper"]["stake"] is None or float(config["paper"]["stake"]) > 0, "paper.stake must be > 0 when set"),
+        (float(config["paper"]["stake_fraction"]) > 0, "paper.stake_fraction must be > 0"),
         (float(config["paper"]["initial_bankroll"]) > 0, "paper.initial_bankroll must be > 0"),
         (float(config["strategy"]["move_threshold_pct"]) >= 0, "strategy.move_threshold_pct must be >= 0"),
         (int(config["strategy"]["observe_start_remaining_seconds"]) > 0, "strategy.observe_start_remaining_seconds must be > 0"),
@@ -221,6 +261,20 @@ def resolution_url(session: dict[str, Any]) -> str:
     return f"{GAMMA_EVENTS_URL}?{urlencode({'limit': 1, 'slug': session.get('market_slug') or session.get('market_id')})}"
 
 
+def market_resolution_url(market_id: str) -> str:
+    return f"{GAMMA_MARKETS_URL}?{urlencode({'limit': 1, 'id': market_id})}"
+
+
+def safe_artifact_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:120] or "unknown"
+
+
+def paper_stake_for_session(args: argparse.Namespace) -> float:
+    if args.paper_stake is not None:
+        return args.paper_stake
+    return equity_fraction_stake(args.ledger_path, args.initial_bankroll, args.stake_fraction)
+
+
 def extract_resolution_market(payload: Any, session: dict[str, Any]) -> dict[str, Any]:
     market_id = str(session.get("market_id") or "")
     market_slug = str(session.get("market_slug") or "")
@@ -236,6 +290,55 @@ def extract_resolution_market(payload: Any, session: dict[str, Any]) -> dict[str
     if len(matches) == 1:
         return matches[0]
     return extract_market(payload)
+
+
+def pending_ledger_resolution_retry(args: argparse.Namespace, source_dir: Path, fetcher: Any = fetch_json) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    resolved = 0
+    still_pending = 0
+    skipped = 0
+    for row in ledger_rows(args.ledger_path):
+        if row.get("result") != "PENDING":
+            continue
+        market_id = str(row.get("market_id") or "")
+        if not market_id:
+            continue
+        safe_id = safe_artifact_name(market_id)
+        raw_path = source_dir / f"pending_resolution_raw_{safe_id}.json"
+        resolution_path = source_dir / f"pending_resolution_{safe_id}.json"
+        step = {"step": "pending_resolution_retry", "market_id": market_id}
+        try:
+            payload, source_timestamp = fetcher(market_resolution_url(market_id))
+            market = extract_market(payload)
+            write_json(raw_path, market)
+            resolution_summary = ingest_metadata(market)
+            write_json(resolution_path, resolution_summary)
+            winning_side = resolution_summary["resolutions"].get(market_id)
+            if winning_side and row.get("side") in (Signal.UP.value, Signal.DOWN.value) and row.get("stake") is not None and row.get("shares") is not None:
+                stake = float(row["stake"])
+                shares = float(row["shares"])
+                pnl = shares - stake if row["side"] == winning_side else -stake
+                result = "WIN" if pnl > 0 else "LOSS"
+                stats = record_result(args.ledger_path, market_id, result, args.initial_bankroll, winning_side=winning_side, paper_pnl=pnl)
+                attempts.append({**step, "status": "resolved", "result": result, "winning_side": winning_side, "paper_pnl": pnl, "equity_after": stats["equity_after"], "resolution_path": str(resolution_path), "raw_resolution_path": str(raw_path), "source_timestamp": source_timestamp})
+                resolved += 1
+                continue
+            if winning_side:
+                reason = "missing_opened_trade_fields"
+            else:
+                reason = resolution_summary["skipped"][0].get("skip_reason", "resolution_skipped")
+            upsert_trade(args.ledger_path, market_id=market_id, result="PENDING", skip_reason=reason)
+            status = "pending" if reason in ("not_closed", "unresolved_resolution_status") else "skipped"
+            attempts.append({**step, "status": status, "reason": reason, "resolution_path": str(resolution_path), "raw_resolution_path": str(raw_path), "source_timestamp": source_timestamp})
+            if status == "pending":
+                still_pending += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            reason = f"public_resolution_blocked={type(exc).__name__}: {exc}"
+            attempts.append({**step, "status": "blocker", "reason": reason})
+            still_pending += 1
+    return {"attempts": attempts, "resolved": resolved, "pending": still_pending, "skipped": skipped}
 
 
 def precise_resolution_summary(summary: dict[str, Any], resolution_skips: dict[str, str]) -> dict[str, Any]:
@@ -368,9 +471,16 @@ def fmt_money(value: Any) -> str:
         return "None"
 
 
+def fmt_amount(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "None"
+
+
 def fmt_pct(value: Any) -> str:
     try:
-        return f"{float(value):.4f}%"
+        return f"{float(value):.2f}%"
     except (TypeError, ValueError):
         return "None"
 
@@ -393,6 +503,38 @@ def operator_time(value: Any) -> str:
     return str(value)
 
 
+def session_window_text(session: dict[str, Any]) -> str:
+    try:
+        start = parse_datetime(str(session.get("market_start_time"))).astimezone(BEIJING_TZ)
+        end = parse_datetime(str(session.get("market_end_time"))).astimezone(BEIJING_TZ)
+    except (TypeError, ValueError):
+        return "unknown_window"
+    if start.date() == end.date():
+        return f"{start:%Y-%m-%d %H:%M}-{end:%H:%M %Z}"
+    return f"{start:%Y-%m-%d %H:%M}-{end:%Y-%m-%d %H:%M %Z}"
+
+
+def watch_line(session: dict[str, Any]) -> str:
+    return f"[WATCH] {session_window_text(session)}"
+
+
+def bet_line(side: Any, stake: Any, avg: Any, shares: Any, move: Any) -> str:
+    return f"[BET] {fmt(side)} stake={fmt_amount(stake)} avg={fmt_amount(avg)} shares={fmt_amount(shares)} move={fmt_pct(move)}"
+
+
+def no_bet_line(reason: Any, move: Any = None) -> str:
+    suffix = "" if move is None else f" move={fmt_pct(move)}"
+    return f"[NO_BET] {fmt(reason)}{suffix}"
+
+
+def settled_line(side: Any, result: str, pnl: Any, equity: Any) -> str:
+    return f"[SETTLED] {fmt(side)} {result} pnl={fmt_money(pnl)} equity={fmt_amount(equity)}"
+
+
+def pending_line(reason: Any) -> str:
+    return f"[PENDING] {fmt(reason or 'awaiting_public_resolution')}"
+
+
 def market_slug(session: dict[str, Any]) -> str:
     return str(session.get("market_slug") or session.get("market_id") or "unknown")
 
@@ -401,12 +543,29 @@ def ledger_row(args: argparse.Namespace, market_id: str) -> dict[str, Any]:
     return next((row for row in ledger_rows(args.ledger_path) if row.get("market_id") == market_id), {})
 
 
-def emit_market_results(args: argparse.Namespace, summary: dict[str, Any]) -> None:
+def current_report_market_ids(report: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for session_report in report.get("sessions", []):
+        market_id = (session_report.get("session") or {}).get("market_id")
+        if market_id:
+            ids.add(str(market_id))
+    return ids
+
+
+def emit_market_results(args: argparse.Namespace, summary: dict[str, Any], allowed_market_ids: set[str] | None = None) -> None:
+    emitted = getattr(args, "_emitted_result_keys", set())
     for item in summary.get("per_session", []):
         session = item.get("session") or {}
         market_id = str(session.get("market_id") or "")
         if not market_id:
             continue
+        if allowed_market_ids is not None and market_id not in allowed_market_ids:
+            continue
+        reason = item.get("skip_reason")
+        result_key = (market_id, item.get("status"), item.get("winning_side"), reason)
+        if result_key in emitted:
+            continue
+        emitted.add(result_key)
         row = ledger_row(args, market_id)
         if item.get("status") == "closed":
             paper_pnl = (item.get("summary", {}).get("tradable_signal", {}).get("paper_pnl") or [])
@@ -414,20 +573,17 @@ def emit_market_results(args: argparse.Namespace, summary: dict[str, Any]) -> No
             pnl = first.get("paper_pnl", 0)
             result = "WIN" if pnl > 0 else "LOSS" if paper_pnl else "SKIPPED"
             stats = record_result(args.ledger_path, market_id, result, args.initial_bankroll, winning_side=item.get("winning_side"), paper_pnl=pnl)
-            operator_print(
-                args,
-                f"[RESULT] market_id={market_id} side={fmt(first.get('signal') or row.get('side'))} winning_side={fmt(item.get('winning_side'))} result={result} pnl={fmt_money(pnl)} equity={fmt_money(stats['equity_after'])} return={fmt_pct(stats['return_pct'])} win_rate={fmt_pct(stats['win_rate'])} settled={stats['settled_count']}",
-            )
+            operator_print(args, settled_line(first.get("signal") or row.get("side"), result, pnl, stats["equity_after"]))
             continue
-        reason = item.get("skip_reason")
         result = "PENDING" if reason in ("missing_resolution", "not_closed") else "SKIPPED"
         if reason == "observation_window_no_signal":
             result = "NO_TRADE"
         stats = record_result(args.ledger_path, market_id, result, args.initial_bankroll, skip_reason=reason)
-        operator_print(
-            args,
-            f"[RESULT] market_id={market_id} side={fmt(row.get('side'))} winning_side=None result={result} pnl=+0.00 equity={fmt_money(stats['equity_after'])} return={fmt_pct(stats['return_pct'])} reason={fmt(reason)}",
-        )
+        if result == "PENDING":
+            operator_print(args, pending_line(reason))
+        elif result in ("NO_TRADE", "SKIPPED"):
+            operator_print(args, no_bet_line(reason))
+    args._emitted_result_keys = emitted
 
 
 async def process_session(
@@ -441,6 +597,8 @@ async def process_session(
     meta = session_meta(session)
     session_report: dict[str, Any] = {"session_index": index, "session": meta, "steps": [], "runner_output": None, "status": "attempted"}
     market_id = str(session.get("market_id") or "")
+    session_stake = paper_stake_for_session(args)
+    operator_print(args, watch_line(session))
     if market_id:
         upsert_trade(
             args.ledger_path,
@@ -449,7 +607,7 @@ async def process_session(
             market_end_time=session.get("market_end_time"),
             threshold_pct=args.move_threshold_pct,
             observe_start_remaining_seconds=args.observe_start_remaining_seconds,
-            stake=args.paper_stake,
+            stake=session_stake,
             result="PENDING",
         )
 
@@ -463,7 +621,7 @@ async def process_session(
         session_report.update({"status": "skipped", "skip_reason": reason})
         if market_id:
             record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
-        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
+        operator_print(args, no_bet_line(reason))
         return session_report
 
     btc_records: list[CaptureRecord] = []
@@ -482,7 +640,7 @@ async def process_session(
         session_report.update({"status": "skipped", "skip_reason": reason})
         if market_id:
             record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
-        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
+        operator_print(args, no_bet_line(reason))
         return session_report
 
     enriched_session = enriched["selection"]
@@ -511,7 +669,7 @@ async def process_session(
         session_report.update({"status": "skipped", "skip_reason": reason})
         if market_id:
             record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
-        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
+        operator_print(args, no_bet_line(reason))
         return session_report
     end = parse_datetime(enriched_session["market_end_time"])
     observation_checks = 0
@@ -522,7 +680,7 @@ async def process_session(
             result = await run_session_once(
                 session=enriched_session,
                 open_price=float(enriched_session["open_price"]),
-                stake=args.paper_stake,
+                stake=session_stake,
                 output=runner_output,
                 seconds=args.runner_seconds,
                 caller_supplied_p_hat=args.p_hat,
@@ -563,12 +721,12 @@ async def process_session(
             if result["status"] == "paper_opened":
                 operator_print(
                     args,
-                    f"[TRADE] market_id={market_id} side={decision.signal.value} stake={decision.stake} ask={decision.executable_avg_ask} shares={decision.shares:.4f} move={fmt_pct(signal_record.ret_pct if signal_record else None)} rem={fmt(signal_record.remaining_seconds if signal_record else None)}",
+                    bet_line(decision.signal.value, decision.stake, decision.executable_avg_ask, decision.shares, signal_record.ret_pct if signal_record else None),
                 )
             else:
                 if market_id:
                     record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=result.get("reason"))
-                operator_print(args, f"[SKIP] market_id={market_id} reason={result.get('reason')} move={fmt_pct(signal_record.ret_pct if signal_record else None)} rem={fmt(signal_record.remaining_seconds if signal_record else None)}")
+                operator_print(args, no_bet_line(result.get("reason"), signal_record.ret_pct if signal_record else None))
             append_jsonl(supervisor_jsonl, {"record_type": "session_runner_finished", "session": meta, "runner_output": str(runner_output)})
             session_report["steps"].append({"step": "paper_runner", "status": "completed", "runner_output": str(runner_output), "observation_checks": observation_checks})
             session_report["status"] = "completed"
@@ -587,7 +745,7 @@ async def process_session(
                 skip_reason=reason,
             )
             record_result(args.ledger_path, market_id, "NO_TRADE", args.initial_bankroll, skip_reason=reason)
-        operator_print(args, f"[SKIP] market_id={market_id} reason={reason} move={fmt_pct(last_signal_record.ret_pct if last_signal_record else None)} rem={fmt(last_signal_record.remaining_seconds if last_signal_record else None)}")
+        operator_print(args, no_bet_line("no_signal", last_signal_record.ret_pct if last_signal_record else None))
         append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "runner_output": str(runner_output), "skip_reason": reason})
         session_report["steps"].append({"step": "paper_runner", "status": "skipped", "runner_output": str(runner_output), "reason": reason, "observation_checks": observation_checks})
         session_report.update({"status": "skipped", "skip_reason": reason})
@@ -598,106 +756,68 @@ async def process_session(
         session_report.update({"status": "blocker", "skip_reason": reason})
         if market_id:
             record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
-        operator_print(args, f"[SKIP] market_id={market_id} reason={reason}")
+        operator_print(args, no_bet_line(reason))
     return session_report
 
 
-async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
-    run_dir = args.run_dir or Path(tempfile.mkdtemp(prefix="polybot_phase14_e2e_dry_run_")) / "run"
-    operator_print(
-        args,
-        f"[RUN_START] run_dir={run_dir} config={fmt(args.config)} max_sessions={args.max_sessions} stake={args.paper_stake} p_hat_filter={args.p_hat_filter_enabled}",
-    )
+def start_run_report(args: argparse.Namespace, run_dir: Path) -> tuple[dict[str, Any], Path, Path]:
+    update_latest_run_pointers(run_dir)
     source_dir = run_dir / "_source"
     source_dir.mkdir(parents=True, exist_ok=True)
     supervisor_jsonl = source_dir / "supervisor.jsonl"
-    supervisor_jsonl.write_text("", encoding="utf-8")
+    if not supervisor_jsonl.exists():
+        supervisor_jsonl.write_text("", encoding="utf-8")
     report: dict[str, Any] = {
         "task_id": "polybot-paper-phase-14-public-data-e2e-dry-run",
         "config": args.config_snapshot,
         "public_data_source": None,
         "steps": [],
         "blockers": [],
+        "sessions": [],
+        "beijing_day": run_dir.name if is_daily_run_dir(run_dir) else None,
     }
+    return report, source_dir, supervisor_jsonl
 
-    payload, source_timestamp, data_source = load_public_payload(args)
-    report["public_data_source"] = data_source
-    report["sessions"] = []
-    started = time.monotonic()
-    cursor = parse_datetime(args.now) if args.now else datetime.now(timezone.utc)
-    processed_ids: set[str] = set()
-    stop_reason = "reached_max_sessions"
-    discovery_attempts = 0
 
-    while len(report["sessions"]) < args.max_sessions:
-        elapsed = time.monotonic() - started
-        remaining_runtime = args.max_runtime_seconds - elapsed
-        if remaining_runtime <= 0:
-            stop_reason = "max_runtime_seconds_exceeded"
-            break
-
-        discovery_attempts += 1
-        try:
-            if args.input_json:
-                result = select_session(payload, cursor, args.lookahead_minutes, args.mode, paper_stake=args.paper_stake, caller_supplied_p_hat=args.p_hat, source_timestamp=source_timestamp)
-            else:
-                result = discover_session(args, cursor, fetch_json)
-                source_timestamp = next((stamp for stamp in result.get("diagnostics", {}).get("source_timestamps", []) if stamp), None)
-            discovery_step = {"step": "discovery_fetch", "status": "success", "source_timestamp": source_timestamp, "cursor": cursor.isoformat(), "attempt": discovery_attempts}
-            report["steps"].append(discovery_step)
-        except Exception as exc:
-            reason = f"public_discovery_blocked={type(exc).__name__}: {exc}"
-            report["steps"].append({"step": "discovery_fetch", "status": "blocker", "reason": reason, "cursor": cursor.isoformat(), "attempt": discovery_attempts})
-            report["blockers"].append(reason)
-            append_downstream_skips(report, "discovery_fetch_blocker")
-            append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": {"market_id": "public-discovery", "market_slug": None}, "skip_reason": reason})
-            stop_reason = reason
-            break
-
-        session = result.get("selection")
-        if not session:
-            reason = result.get("skip_reason", "no_valid_candidate")
-            report["steps"].append({"step": "session_discovery", "status": "skipped", "reason": reason, "details": result, "cursor": cursor.isoformat(), "attempt": discovery_attempts})
-            append_downstream_skips(report, "session_discovery_skip")
-            append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": {"market_id": "public-session-discovery", "market_slug": None}, "skip_reason": reason})
-            stop_reason = reason
-            break
-
-        market_id = str(session.get("market_id"))
-        if market_id in processed_ids:
-            report["steps"].append({"step": "session_discovery", "status": "skipped", "reason": "duplicate_session", "session": session_meta(session), "cursor": cursor.isoformat(), "attempt": discovery_attempts})
-            cursor = parse_datetime(session["market_start_time"])
-            if discovery_attempts > args.max_sessions * 3:
-                stop_reason = "duplicate_session"
-                break
-            continue
-
-        processed_ids.add(market_id)
-        report["steps"].append({"step": "session_discovery", "status": "success", "session": session_meta(session), "cursor": cursor.isoformat(), "attempt": discovery_attempts})
-        session_report = await process_session(args, session, source_dir, supervisor_jsonl, len(report["sessions"]) + 1, remaining_runtime)
-        report["sessions"].append(session_report)
-        report["steps"].extend({"session_index": session_report["session_index"], **step} for step in session_report["steps"])
-        cursor = parse_datetime(session["market_start_time"])
-
+def refresh_resolution(args: argparse.Namespace, report: dict[str, Any], source_dir: Path, supervisor_jsonl: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     resolution_result = {
         "resolutions": {},
         "resolution_paths": {},
         "raw_resolution_paths": {},
         "resolution_skips": {},
         "attempts": [],
+        "pending_retry": {"attempts": [], "resolved": 0, "pending": 0, "skipped": 0},
     }
     if args.attempt_public_resolution:
+        pending_retry = pending_ledger_resolution_retry(args, source_dir)
         resolution_result = attempt_public_resolutions(report, source_dir)
+        resolution_result["pending_retry"] = pending_retry
+        report["steps"].extend(pending_retry["attempts"])
         report["steps"].extend(resolution_result["attempts"])
-        if not resolution_result["attempts"]:
-            report["steps"].append({"step": "resolution", "status": "skipped", "reason": "no_completed_runner_output"})
-
     summary = precise_resolution_summary(batch_close(supervisor_jsonl, resolution_result["resolutions"]), resolution_result["resolution_skips"])
-    emit_market_results(args, summary)
+    emit_market_results(args, summary, current_report_market_ids(report))
+    return resolution_result, summary
+
+
+def finalize_run(
+    args: argparse.Namespace,
+    run_dir: Path,
+    source_dir: Path,
+    supervisor_jsonl: Path,
+    report: dict[str, Any],
+    stop_reason: str,
+    *,
+    status: str,
+) -> dict[str, Any]:
+    resolution_result, summary = refresh_resolution(args, report, source_dir, supervisor_jsonl)
+    if args.attempt_public_resolution and not resolution_result["attempts"] and not resolution_result["pending_retry"]["attempts"]:
+        report["steps"].append({"step": "resolution", "status": "skipped", "reason": "no_completed_runner_output"})
+
     report["attempted_session_count"] = len(report["sessions"])
     report["processed_session_count"] = sum(1 for session in report["sessions"] if session.get("status") == "completed")
     report["final_stop_reason"] = stop_reason
     report["resolution_attempted_count"] = len(resolution_result["attempts"])
+    report["pending_resolution_retry"] = resolution_result["pending_retry"]
     report["sessions_closed"] = summary["sessions_closed"]
     report["sessions_pending_or_skipped"] = summary["sessions_skipped"]
     if args.attempt_public_resolution:
@@ -706,6 +826,7 @@ async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
                 "step": "resolution_result",
                 "status": "closed" if summary["sessions_closed"] else "pending_or_skipped",
                 "resolution_attempted_count": report["resolution_attempted_count"],
+                "pending_resolution_retry": report["pending_resolution_retry"],
                 "sessions_closed": summary["sessions_closed"],
                 "sessions_pending_or_skipped": summary["sessions_skipped"],
                 "skipped_reasons": summary["skipped_reasons"],
@@ -720,14 +841,14 @@ async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
         summary,
         run_id=args.run_id,
         mode="public_data_e2e_dry_run",
-        status="completed" if not report["blockers"] else "blocked",
+        status=status,
         config_snapshot=report["config"],
         raw_resolution_paths=resolution_result["raw_resolution_paths"],
         resolution_paths=resolution_result["resolution_paths"],
         resolution_skips=resolution_result["resolution_skips"],
     )
     session_index = read_json(paths["session_index"])
-    status = run_long_run(
+    long_status = run_long_run(
         run_dir,
         session_index["sessions"],
         resume=True,
@@ -743,11 +864,102 @@ async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
             "manifest": str(paths["manifest"]),
             "session_index": str(paths["session_index"]),
             "summary": str(paths["summary"]),
-            "final_status": status["status"],
+            "final_status": long_status["status"],
         }
     )
     write_json(run_dir / "dry_run_report.json", report)
     return report
+
+
+async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = resolve_run_dir(args.run_dir, parse_datetime(args.now) if args.now else None)
+    daily_base = run_dir.parent if is_daily_run_dir(run_dir) else None
+    stake_text = args.paper_stake if args.paper_stake is not None else f"equity*{args.stake_fraction}"
+    operator_print(
+        args,
+        f"[RUN] stake={fmt_amount(stake_text) if args.paper_stake is not None else stake_text} p_hat_filter={args.p_hat_filter_enabled}",
+    )
+    report, source_dir, supervisor_jsonl = start_run_report(args, run_dir)
+
+    payload, source_timestamp, data_source = load_public_payload(args)
+    report["public_data_source"] = data_source
+    refresh_resolution(args, report, source_dir, supervisor_jsonl)
+    started = time.monotonic()
+    cursor = parse_datetime(args.now) if args.now else datetime.now(timezone.utc)
+    processed_ids: set[str] = set()
+    stop_reason = "max_sessions_safety_cap_reached"
+    discovery_attempts = 0
+
+    try:
+        while len(processed_ids) < args.max_sessions:
+            if daily_base is not None and datetime.now(timezone.utc) >= next_beijing_midnight(parse_datetime(f"{run_dir.name}T00:00:00+08:00")):
+                finalize_run(args, run_dir, source_dir, supervisor_jsonl, report, "beijing_day_rollover", status="completed")
+                run_dir = daily_base / beijing_day_text()
+                report, source_dir, supervisor_jsonl = start_run_report(args, run_dir)
+                report["public_data_source"] = data_source
+
+            elapsed = time.monotonic() - started
+            remaining_runtime = args.max_runtime_seconds - elapsed
+            if remaining_runtime <= 0:
+                stop_reason = "max_runtime_seconds_exceeded"
+                break
+
+            discovery_attempts += 1
+            try:
+                if args.input_json:
+                    result = select_session(payload, cursor, args.lookahead_minutes, args.mode, paper_stake=paper_stake_for_session(args), caller_supplied_p_hat=args.p_hat, source_timestamp=source_timestamp)
+                else:
+                    result = discover_session(args, cursor, fetch_json)
+                    source_timestamp = next((stamp for stamp in result.get("diagnostics", {}).get("source_timestamps", []) if stamp), None)
+                discovery_step = {"step": "discovery_fetch", "status": "success", "source_timestamp": source_timestamp, "cursor": cursor.isoformat(), "attempt": discovery_attempts}
+                report["steps"].append(discovery_step)
+            except Exception as exc:
+                reason = f"public_discovery_blocked={type(exc).__name__}: {exc}"
+                report["steps"].append({"step": "discovery_fetch", "status": "blocker", "reason": reason, "cursor": cursor.isoformat(), "attempt": discovery_attempts})
+                report["blockers"].append(reason)
+                append_downstream_skips(report, "discovery_fetch_blocker")
+                append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": {"market_id": "public-discovery", "market_slug": None}, "skip_reason": reason})
+                stop_reason = reason
+                break
+
+            session = result.get("selection")
+            if not session:
+                reason = result.get("skip_reason", "no_valid_candidate")
+                report["steps"].append({"step": "session_discovery", "status": "skipped", "reason": reason, "details": result, "cursor": cursor.isoformat(), "attempt": discovery_attempts})
+                append_downstream_skips(report, "session_discovery_skip")
+                append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": {"market_id": "public-session-discovery", "market_slug": None}, "skip_reason": reason})
+                stop_reason = reason
+                break
+
+            if daily_base is not None:
+                session_day = beijing_day_text(parse_datetime(session["market_start_time"]))
+                if session_day != run_dir.name:
+                    finalize_run(args, run_dir, source_dir, supervisor_jsonl, report, "beijing_day_rollover", status="completed")
+                    run_dir = daily_base / session_day
+                    report, source_dir, supervisor_jsonl = start_run_report(args, run_dir)
+                    report["public_data_source"] = data_source
+
+            market_id = str(session.get("market_id"))
+            if market_id in processed_ids:
+                report["steps"].append({"step": "session_discovery", "status": "skipped", "reason": "duplicate_session", "session": session_meta(session), "cursor": cursor.isoformat(), "attempt": discovery_attempts})
+                cursor = parse_datetime(session["market_start_time"])
+                if discovery_attempts > args.max_sessions * 3:
+                    stop_reason = "duplicate_session"
+                    break
+                continue
+
+            processed_ids.add(market_id)
+            report["steps"].append({"step": "session_discovery", "status": "success", "session": session_meta(session), "cursor": cursor.isoformat(), "attempt": discovery_attempts})
+            session_report = await process_session(args, session, source_dir, supervisor_jsonl, len(report["sessions"]) + 1, remaining_runtime)
+            report["sessions"].append(session_report)
+            report["steps"].extend({"session_index": session_report["session_index"], **step} for step in session_report["steps"])
+            refresh_resolution(args, report, source_dir, supervisor_jsonl)
+            cursor = parse_datetime(session["market_start_time"])
+    except KeyboardInterrupt:
+        stop_reason = "interrupted"
+        return finalize_run(args, run_dir, source_dir, supervisor_jsonl, report, stop_reason, status="interrupted")
+
+    return finalize_run(args, run_dir, source_dir, supervisor_jsonl, report, stop_reason, status="completed" if not report["blockers"] else "blocked")
 
 
 def close_existing_run(args: argparse.Namespace) -> dict[str, Any]:
@@ -811,6 +1023,23 @@ def self_check() -> Path:
     assert read_json(run_dir / "dry_run_report.json")["steps"][0]["reason"] == "no_valid_candidate"
     assert beijing_time_text(datetime(2026, 7, 8, 4, 0, tzinfo=timezone.utc)) == "2026-07-08 12:00:00 CST"
     assert operator_time("2026-07-08T04:15:00+00:00") == "2026-07-08 12:15:00 CST"
+    assert beijing_day_text(datetime(2026, 7, 8, 15, 59, tzinfo=timezone.utc)) == "2026-07-08"
+    assert beijing_day_text(datetime(2026, 7, 8, 16, 0, tzinfo=timezone.utc)) == "2026-07-09"
+    assert next_beijing_midnight(datetime(2026, 7, 8, 15, 59, tzinfo=timezone.utc)) == datetime(2026, 7, 8, 16, 0, tzinfo=timezone.utc)
+    concise_lines = [
+        watch_line({"market_start_time": "2026-07-09T10:00:00+00:00", "market_end_time": "2026-07-09T10:15:00+00:00", "market_id": "hidden"}),
+        bet_line("DOWN", 50, 0.82, 60.98, -0.31),
+        no_bet_line("no_signal", 0.08),
+        settled_line("DOWN", "WIN", 10.98, 1010.98),
+        pending_line("awaiting_public_resolution"),
+    ]
+    assert concise_lines[0] == "[WATCH] 2026-07-09 18:00-18:15 CST"
+    assert concise_lines[1] == "[BET] DOWN stake=50.00 avg=0.82 shares=60.98 move=-0.31%"
+    assert concise_lines[2] == "[NO_BET] no_signal move=0.08%"
+    assert concise_lines[3] == "[SETTLED] DOWN WIN pnl=+10.98 equity=1010.98"
+    assert concise_lines[4] == "[PENDING] awaiting_public_resolution"
+    assert all("market_id=" not in line for line in concise_lines)
+    assert current_report_market_ids({"sessions": [{"session": {"market_id": "fresh"}}, {"session": {"market_id": ""}}, {}]}) == {"fresh"}
     wait_step = asyncio.run(wait_to_open({"market_start_time": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()}, 0.0))
     assert wait_step["reason"] == "wait_to_open_budget_exceeded"
     config_root = Path(tempfile.mkdtemp(prefix="polybot_config_self_check_"))
@@ -849,6 +1078,27 @@ def self_check() -> Path:
     assert config_args.p_hat_filter_enabled is False
     assert config_args.p_hat is None
     assert config_args.max_sessions == 2
+
+    fraction_root = Path(tempfile.mkdtemp(prefix="polybot_stake_fraction_self_check_"))
+    fraction_args = apply_config(
+        build_parser().parse_args(
+            [
+                "--ledger-path",
+                str(fraction_root / "paper_trades.sqlite3"),
+                "--initial-bankroll",
+                "1000",
+                "--no-operator-output-enabled",
+            ]
+        )
+    )
+    assert fraction_args.paper_stake is None
+    assert fraction_args.stake_fraction == 0.05
+    assert paper_stake_for_session(fraction_args) == 50.0
+    record_result(fraction_args.ledger_path, "stake-win", "WIN", fraction_args.initial_bankroll, winning_side="UP", paper_pnl=11.0)
+    assert round(paper_stake_for_session(fraction_args), 6) == 50.55
+
+    threshold_args = apply_config(build_parser().parse_args(["--no-operator-output-enabled"]))
+    assert threshold_args.move_threshold_pct == configured_move_threshold_pct()
 
     multi_payload = [
         {
@@ -969,11 +1219,72 @@ def self_check() -> Path:
     assert close_index["sessions"][0]["resolution_path"] == "sessions/01_market-pending/resolution.json"
     assert close_index["sessions"][0]["resolution_raw_path"] == "sessions/01_market-pending/resolution_raw.json"
     assert close_index["sessions"][0]["skip_reason"] == "not_closed"
+
+    settle_root = Path(tempfile.mkdtemp(prefix="polybot_daily_settlement_self_check_"))
+    settle_run = settle_root / "2026-07-08"
+    settle_report, settle_source, settle_supervisor = start_run_report(multi_args, settle_run)
+    settle_runner_closed = settle_source / "runner_closed.jsonl"
+    settle_runner_pending = settle_source / "runner_pending.jsonl"
+    settle_runner_closed.write_text(
+        "\n".join(
+            [
+                json.dumps({"record_type": "signal_record", "record": {"signal": "UP"}}, sort_keys=True),
+                json.dumps({"record_type": "paper_trade_record", "record": {"signal": "UP", "stake": 9.0, "shares": 20.0}}, sort_keys=True),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settle_runner_pending.write_text(json.dumps({"record_type": "signal_record", "record": {"signal": "UP"}}, sort_keys=True) + "\n", encoding="utf-8")
+    for market_id in ("market-closed", "market-pending"):
+        upsert_trade(multi_args.ledger_path, market_id=market_id, result="PENDING")
+    append_jsonl(settle_supervisor, {"record_type": "session_runner_finished", "session": {"market_id": "market-closed"}, "runner_output": str(settle_runner_closed)})
+    append_jsonl(settle_supervisor, {"record_type": "session_runner_finished", "session": {"market_id": "market-pending"}, "runner_output": str(settle_runner_pending)})
+    settle_summary = precise_resolution_summary(batch_close(settle_supervisor, {"market-closed": "UP"}), {"market-pending": "not_closed"})
+    emit_market_results(multi_args, settle_summary)
+    settle_rows = {row["market_id"]: row for row in ledger_rows(multi_args.ledger_path)}
+    assert settle_rows["market-closed"]["result"] == "WIN"
+    assert settle_rows["market-pending"]["result"] == "PENDING"
+
+    pending_root = Path(tempfile.mkdtemp(prefix="polybot_pending_retry_self_check_"))
+    pending_args = apply_config(
+        build_parser().parse_args(
+            [
+                "--ledger-path",
+                str(pending_root / "paper_trades.sqlite3"),
+                "--initial-bankroll",
+                "1000",
+                "--no-operator-output-enabled",
+            ]
+        )
+    )
+    pending_source = pending_root / "_source"
+    pending_source.mkdir(parents=True, exist_ok=True)
+    upsert_trade(pending_args.ledger_path, market_id="pending-clear", result="PENDING", side="UP", stake=50.0, shares=80.0)
+    upsert_trade(pending_args.ledger_path, market_id="pending-open", result="PENDING", side="DOWN", stake=50.0, shares=80.0)
+
+    def fake_pending_fetch(url: str) -> tuple[dict[str, Any], str]:
+        if "pending-clear" in url:
+            return {"id": "pending-clear", "closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["1", "0"]'}, "fixture-clear"
+        return {"id": "pending-open", "closed": False, "outcomes": '["Up", "Down"]', "outcomePrices": '["0.5", "0.5"]'}, "fixture-open"
+
+    pending_retry = pending_ledger_resolution_retry(pending_args, pending_source, fake_pending_fetch)
+    pending_rows = {row["market_id"]: row for row in ledger_rows(pending_args.ledger_path)}
+    assert pending_retry["resolved"] == 1
+    assert pending_retry["pending"] == 1
+    assert pending_rows["pending-clear"]["result"] == "WIN"
+    assert pending_rows["pending-clear"]["paper_pnl"] == 30.0
+    assert pending_rows["pending-open"]["result"] == "PENDING"
+    assert pending_rows["pending-open"]["skip_reason"] == "not_closed"
+
+    finalize_report = finalize_run(multi_args, settle_run, settle_source, settle_supervisor, settle_report, "interrupted", status="interrupted")
+    assert read_json(Path(finalize_report["manifest"]))["status"] in ("interrupted", "stopped")
+    assert read_json(settle_run / "dry_run_report.json")["final_stop_reason"] == "interrupted"
     return run_dir
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bounded public-data end-to-end paper dry run.")
+    parser = argparse.ArgumentParser(description="Beijing-day rolling public-data end-to-end paper dry run.")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--run-dir", type=Path)
@@ -987,9 +1298,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pages", type=int)
     parser.add_argument("--mode", choices=("current", "next"))
     parser.add_argument("--lookahead-minutes", type=int)
-    parser.add_argument("--max-sessions", type=int)
+    parser.add_argument("--max-sessions", type=int, help="safety cap; normal run boundary is Beijing midnight")
     parser.add_argument("--max-runtime-seconds", type=float)
     parser.add_argument("--paper-stake", type=float)
+    parser.add_argument("--stake-fraction", type=float)
     parser.add_argument("--initial-bankroll", type=float)
     parser.add_argument("--ledger-path", type=Path)
     parser.add_argument("--p-hat", type=float)

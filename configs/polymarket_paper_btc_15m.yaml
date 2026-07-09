@@ -1,11 +1,17 @@
 strategy:
   market_type: "btc_up_down_15m"
   observe_start_remaining_seconds: 300
-  move_threshold_pct: 0.05
+  move_threshold_pct: 0.15
   max_entries_per_market: 1
 
 paper:
-  stake: 9
+  # Null means stake is computed as current settled simulated equity * stake_fraction.
+  # Set stake to a number only when you want a fixed manual USDC-equivalent amount.
+  stake:
+  # Manual default sizing knob: 0.05 means each new paper entry uses 5% of
+  # current settled simulated account equity. Change this percentage here when
+  # you want entries to use more or less of the account by default.
+  stake_fraction: 0.05
   initial_bankroll: 1000
   ledger_path: "data/paper_trades.sqlite3"
 
@@ -32,6 +38,7 @@ capture:
   runner_seconds: 8
 
 runtime:
+  # Safety cap only; normal run boundary is Beijing calendar day rollover.
   max_sessions: 96
   max_runtime_seconds: 90000
   retry_limit: 1

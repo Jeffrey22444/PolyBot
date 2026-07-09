@@ -9,45 +9,54 @@ installer or live-order path is required.
 Recommended run directory convention:
 
 ```bash
-RUN_DIR="runs/paper-btc-15m/$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DIR="runs/paper-btc-15m/$(TZ=Asia/Shanghai date +%Y-%m-%d)"
 mkdir -p "$RUN_DIR"
 ```
 
 Recommended copy-paste command:
 
 ```bash
-python3 -m polybot.e2e_dry_run \
-  --config configs/polymarket_paper_btc_15m.yaml \
-  --attempt-public-resolution \
-  --run-dir "$RUN_DIR"
+./scripts/paper_btc_15m_launch.sh
 ```
 
 Notes:
 
+- The launcher is the normal daily command. It writes artifacts under the
+  Beijing-date run directory, writes full logs, prints compact status lines in
+  the Terminal, and retries after short normal exits.
 - `--p-hat` is still caller-supplied. It is not a trained or inferred model.
 - `configs/polymarket_paper_btc_15m.yaml` controls the observation window,
-  threshold, stake, `p_hat` filter, discovery, timing, capture, runtime, and
-  operator-output defaults.
+  threshold, stake fraction, `p_hat` filter, discovery, timing, capture,
+  runtime, and operator-output defaults.
+- Normal operation rolls by Beijing calendar day. `runtime.max_sessions` is a
+  safety cap, not the normal run boundary.
 - The default local ledger is `data/paper_trades.sqlite3`. It is a supplemental
   inspection file; JSON artifacts remain the source for run/session artifacts.
 - Command-line flags such as `--paper-stake`, `--move-threshold-pct`, or
   `--no-p-hat-filter-enabled` override the YAML for that run.
+- By default, stake is `current settled simulated equity * paper.stake_fraction`.
+  With `initial_bankroll: 1000` and `stake_fraction: 0.05`, the first stake is
+  `50`. `--paper-stake` pins a fixed manual override for that run.
 - `--mode next` plus `--search-query "bitcoin up down 15m"` is the current
   calibrated public BTC 15m path.
 - `runs/` is ignored by Git, so local artifacts stay out of commits by default.
 
-During a run, stdout prints compact operator briefs with Beijing-time prefixes.
-Machine artifacts still keep their normal JSON/ISO timestamps.
+During a run, Terminal stdout prints concise operator briefs with Beijing-time
+prefixes. Full CLI output, including machine JSON and diagnostics, is still
+kept in `runs/paper-btc-15m-logs/`.
 
 ```text
-[2026-07-08 12:00:00 CST] [RUN_START] run_dir=... config=... max_sessions=... stake=... p_hat_filter=...
-[2026-07-08 12:10:02 CST] [TRADE] market_id=... side=UP stake=9.0 ask=0.84 shares=10.7143 move=0.0521% rem=242
-[2026-07-08 12:10:03 CST] [SKIP] market_id=... reason=non_positive_trade_edge move=0.0521% rem=242
-[2026-07-08 12:15:01 CST] [RESULT] market_id=... side=UP winning_side=UP result=WIN pnl=+1.71 equity=1001.71 return=0.1710% win_rate=100.0000% settled=1
+[2026-07-09 17:55:00 CST] [RUN] stake=equity*0.05 p_hat_filter=False
+[2026-07-09 17:55:02 CST] [WATCH] 2026-07-09 18:00-18:15 CST
+[2026-07-09 18:10:02 CST] [BET] DOWN stake=50.00 avg=0.82 shares=60.98 move=-0.31%
+[2026-07-09 18:15:01 CST] [SETTLED] DOWN WIN pnl=+10.98 equity=1010.98
+[2026-07-09 18:30:01 CST] [PENDING] awaiting_public_resolution
+[2026-07-09 18:45:01 CST] [NO_BET] no_signal move=0.08%
 ```
 
-The terminal and ledger intentionally avoid raw orderbook payloads, raw BTC
-ticks, token IDs, and long slugs.
+Terminal output intentionally avoids `market_id`, raw orderbook payloads, raw
+BTC ticks, token IDs, long slugs, full JSON, URLs, candidate snapshots, and raw
+diagnostics.
 
 ## Safe Stop
 
@@ -63,8 +72,8 @@ including:
 - `heartbeat.jsonl`
 - `dry_run_report.json`
 
-Phase 22 does not add process-manager behavior. Do not assume restart, daemon,
-or machine boot integration.
+The repo launcher retries after short normal exits. It is still not a daemon or
+machine boot integration unless you explicitly use the launchd path.
 
 ## Close An Existing Run
 
@@ -73,7 +82,7 @@ result/resolution artifacts from that run without rerunning discovery, open
 price capture, or paper execution.
 
 ```bash
-SOURCE_RUN="runs/paper-btc-15m/<UTC timestamp>"
+SOURCE_RUN="runs/paper-btc-15m/<Beijing YYYY-MM-DD>"
 CLOSE_RUN="runs/paper-btc-15m/$(date -u +%Y%m%dT%H%M%SZ)-close"
 
 python3 -m polybot.e2e_dry_run \
@@ -91,7 +100,7 @@ existing run directory as the source for closing/inspection work.
 Set the run directory once:
 
 ```bash
-RUN_DIR="runs/paper-btc-15m/<UTC timestamp>"
+RUN_DIR="runs/paper-btc-15m/<Beijing YYYY-MM-DD>"
 ```
 
 Check manifest and current status:
@@ -128,6 +137,9 @@ Ledger notes:
 - `result` is one of `WIN`, `LOSS`, `PENDING`, `SKIPPED`, or `NO_TRADE`.
 - `initial_bankroll` defaults to `1000` in
   `configs/polymarket_paper_btc_15m.yaml`.
+- `stake_fraction` defaults to `0.05`; only settled `WIN` and `LOSS` PnL
+  changes simulated equity for the next default stake. `PENDING`, `SKIPPED`,
+  and `NO_TRADE` rows do not change equity.
 - If Polymarket public metadata provides an open/reference price, the ledger
   records `open_price_source=polymarket:<field>`. Otherwise the existing BTC
   capture path is used and recorded as
@@ -191,7 +203,7 @@ Check `dry_run_report.json` first.
 
 - `no_valid_candidate`: discovery did not find one valid next session.
 - `not_closed`: public resolution found the market but it is not closed yet, so
-  final result stays pending/skipped.
+  final result stays pending.
 - `non_positive_trade_edge`: a signal existed, but paper marketability rejected
   the trade edge.
 - `missing_p_hat`: caller did not supply `--p-hat`, so marketability could not
@@ -234,6 +246,8 @@ Current supported operator actions:
 - inspect an existing run directory
 - stop a foreground process and inspect its artifacts
 - run `--close-existing-run-dir` against an existing run directory
+- let the next normal run retry existing ledger `PENDING` markets from public
+  metadata by `market_id`
 
 Current Phase 22 boundary:
 
@@ -257,7 +271,9 @@ runbook.
   `--max-open-price-delay-seconds`: timing controls.
 - `--capture-seconds`, `--capture-limit`, `--observation-tick-seconds`,
   `--runner-seconds`: BTC/open-price and orderbook capture controls.
-- `--paper-stake`: fixed paper stake.
+- `--paper-stake`: fixed manual paper stake override for a run.
+- `--stake-fraction`: default stake fraction of current settled simulated
+  equity when `--paper-stake` is not set. The YAML default is `0.05`.
 - `--initial-bankroll`: local ledger bankroll baseline.
 - `--ledger-path`: local SQLite ledger path. Defaults to
   `data/paper_trades.sqlite3`.

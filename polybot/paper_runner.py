@@ -14,6 +14,7 @@ from polybot.market_data import CaptureRecord, capture_btc_reference, capture_po
 from polybot.marketability import evaluate_marketability
 from polybot.market_discovery import sample_payload, select_session
 from polybot.paper import PaperTradeRecord, SkippedTradeRecord
+from polybot.runtime_config import configured_move_threshold_pct
 from polybot.signal import Signal, build_signal_record
 
 
@@ -105,70 +106,6 @@ def parse_entry_remain_seconds(value: str) -> tuple[int, ...]:
     return tuple(int(part.strip()) for part in value.split(",") if part.strip())
 
 
-async def capture_session(asset_id: str, seconds: float, limit: int) -> tuple[list[CaptureRecord], list[CaptureRecord]]:
-    market_task = capture_polymarket_market([asset_id], seconds, limit)
-    btc_task = capture_btc_reference(seconds, limit)
-    return await asyncio.gather(market_task, btc_task)
-
-
-async def run_once(
-    asset_id: str,
-    open_price: float,
-    market_end_time: datetime,
-    stake: float,
-    output: Path,
-    seconds: float,
-    caller_supplied_p_hat: float | None,
-    market_records: list[CaptureRecord] | None = None,
-    btc_records: list[CaptureRecord] | None = None,
-    now: datetime | None = None,
-) -> None:
-    append_jsonl(output, "runtime_note", {"note": "runner_started", "asset_id": asset_id})
-
-    if market_records is None or btc_records is None:
-        try:
-            market_records, btc_records = await capture_session(asset_id, seconds, limit=5)
-        except Exception as exc:
-            append_jsonl(output, "runtime_note", {"note": "capture_failed", "error": f"{type(exc).__name__}: {exc}"})
-            market_records = market_records or []
-            btc_records = btc_records or []
-
-    for record in market_records + btc_records:
-        append_jsonl(output, "runtime_note", {"note": "market_data_record", "record": record})
-
-    current_price = latest_btc_price(btc_records)
-    if current_price is None:
-        append_jsonl(output, "runtime_note", {"note": "missing_btc_reference_price"})
-        return
-
-    signal_record = build_signal_record(
-        open_price=open_price,
-        current_price=current_price,
-        market_end_time=market_end_time,
-        now=now or utc_now(),
-    )
-    append_jsonl(output, "signal_record", {"record": signal_record})
-
-    book = latest_book(market_records)
-    if book is None:
-        append_jsonl(output, "runtime_note", {"note": "missing_polymarket_book"})
-        if signal_record.signal in (Signal.UP, Signal.DOWN):
-            skipped = SkippedTradeRecord(signal_record.signal, "missing_polymarket_book", stake)
-            append_jsonl(output, "skipped_trade_record", {"record": skipped})
-        return
-
-    decision = evaluate_marketability(
-        signal=signal_record.signal,
-        market_record=book,
-        stake=stake,
-        caller_supplied_p_hat=caller_supplied_p_hat,
-    )
-    if isinstance(decision, PaperTradeRecord):
-        append_jsonl(output, "paper_trade_record", {"record": decision})
-    else:
-        append_jsonl(output, "skipped_trade_record", {"record": decision})
-
-
 async def run_session_once(
     session: dict[str, Any],
     open_price: float,
@@ -180,7 +117,8 @@ async def run_session_once(
     btc_records: list[CaptureRecord] | None = None,
     now: datetime | None = None,
     entry_remain_seconds: tuple[int, ...] = (180, 240),
-    move_threshold_pct: float = 0.05,
+    *,
+    move_threshold_pct: float,
     observe_start_remaining_seconds: int | None = 300,
     p_hat_filter_enabled: bool = True,
     market_seconds: float | None = None,
@@ -275,7 +213,8 @@ def sample_market_records() -> list[CaptureRecord]:
 
 
 def sample_btc_records() -> list[CaptureRecord]:
-    return sample_btc_records_with_price("100.06")
+    threshold = configured_move_threshold_pct()
+    return sample_btc_records_with_price(str(100.0 * (1 + (threshold + 0.01) / 100)))
 
 
 def sample_btc_records_with_price(price: str) -> list[CaptureRecord]:
@@ -291,43 +230,16 @@ def sample_btc_records_with_price(price: str) -> list[CaptureRecord]:
 
 
 async def self_check() -> Path:
-    output = Path(tempfile.gettempdir()) / "polybot_phase4_runner_self_check.jsonl"
-    output.write_text("", encoding="utf-8")
-    await run_once(
-        asset_id="sample-asset",
-        open_price=100.0,
-        market_end_time=datetime(2026, 7, 6, 12, 15, tzinfo=timezone.utc),
-        stake=9.0,
-        output=output,
-        seconds=1.0,
-        caller_supplied_p_hat=0.55,
-        market_records=sample_market_records(),
-        btc_records=sample_btc_records(),
-        now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
-    )
-    await run_once(
-        asset_id="sample-asset",
-        open_price=100.0,
-        market_end_time=datetime(2026, 7, 6, 12, 15, tzinfo=timezone.utc),
-        stake=9.0,
-        output=output,
-        seconds=1.0,
-        caller_supplied_p_hat=None,
-        market_records=sample_market_records(),
-        btc_records=sample_btc_records(),
-        now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
-    )
-    record_types = [json.loads(line)["record_type"] for line in output.read_text(encoding="utf-8").splitlines()]
-    assert "runtime_note" in record_types
-    assert "signal_record" in record_types
-    assert "paper_trade_record" in record_types
-    assert "skipped_trade_record" in record_types
-    return output
+    return await session_self_check()
 
 
 async def session_self_check() -> Path:
     output = Path(tempfile.gettempdir()) / "polybot_phase7_session_runner_self_check.jsonl"
     output.write_text("", encoding="utf-8")
+    threshold = configured_move_threshold_pct()
+    up_price = str(100.0 * (1 + (threshold + 0.01) / 100))
+    down_price = str(100.0 * (1 - (threshold + 0.01) / 100))
+    no_signal_price = str(100.0 * (1 + max(threshold - 0.01, 0.0) / 100))
     session = select_session(
         sample_payload(),
         datetime(2026, 7, 6, 12, 5, tzinfo=timezone.utc),
@@ -346,8 +258,9 @@ async def session_self_check() -> Path:
         seconds=1.0,
         caller_supplied_p_hat=0.55,
         market_records=sample_market_records(),
-        btc_records=sample_btc_records_with_price("100.06"),
+        btc_records=sample_btc_records_with_price(up_price),
         now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
+        move_threshold_pct=threshold,
     )
     await run_session_once(
         session=session,
@@ -358,9 +271,10 @@ async def session_self_check() -> Path:
         caller_supplied_p_hat=None,
         p_hat_filter_enabled=False,
         market_records=sample_market_records(),
-        btc_records=sample_btc_records_with_price("100.06"),
+        btc_records=sample_btc_records_with_price(up_price),
         now=datetime(2026, 7, 6, 12, 10, tzinfo=timezone.utc),
         observe_start_remaining_seconds=300,
+        move_threshold_pct=threshold,
     )
     await run_session_once(
         session=session,
@@ -370,8 +284,9 @@ async def session_self_check() -> Path:
         seconds=1.0,
         caller_supplied_p_hat=0.55,
         market_records=sample_market_records(),
-        btc_records=sample_btc_records_with_price("99.94"),
+        btc_records=sample_btc_records_with_price(down_price),
         now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
+        move_threshold_pct=threshold,
     )
     await run_session_once(
         session=session,
@@ -381,8 +296,9 @@ async def session_self_check() -> Path:
         seconds=1.0,
         caller_supplied_p_hat=0.55,
         market_records=sample_market_records(),
-        btc_records=sample_btc_records_with_price("100.04"),
+        btc_records=sample_btc_records_with_price(no_signal_price),
         now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
+        move_threshold_pct=threshold,
     )
     missing_down = {**session, "down_token_id": None}
     await run_session_once(
@@ -393,8 +309,9 @@ async def session_self_check() -> Path:
         seconds=1.0,
         caller_supplied_p_hat=0.55,
         market_records=sample_market_records(),
-        btc_records=sample_btc_records_with_price("99.94"),
+        btc_records=sample_btc_records_with_price(down_price),
         now=datetime(2026, 7, 6, 12, 12, tzinfo=timezone.utc),
+        move_threshold_pct=threshold,
     )
 
     records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
@@ -419,15 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--session-self-check", action="store_true")
     parser.add_argument("--session-config", type=Path)
-    parser.add_argument("--polymarket-asset-id")
     parser.add_argument("--open-price", type=float)
-    parser.add_argument("--market-end-time")
     parser.add_argument("--stake", type=float)
     parser.add_argument("--p-hat", type=float)
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--entry-remain-seconds", default="180,240")
     parser.add_argument("--observe-start-remaining-seconds", type=int, default=300)
-    parser.add_argument("--move-threshold-pct", type=float, default=0.05)
+    parser.add_argument("--move-threshold-pct", type=float)
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -458,6 +373,11 @@ async def async_main(args: argparse.Namespace) -> int:
         if stake is None:
             raise SystemExit("missing required stake: pass --stake or include paper_stake in session config")
         p_hat = args.p_hat if args.p_hat is not None else session.get("caller_supplied_p_hat")
+        move_threshold_pct = args.move_threshold_pct
+        if move_threshold_pct is None:
+            move_threshold_pct = session.get("move_threshold_pct")
+        if move_threshold_pct is None:
+            move_threshold_pct = configured_move_threshold_pct()
         args.output.write_text("", encoding="utf-8")
         await run_session_once(
             session=session,
@@ -467,36 +387,13 @@ async def async_main(args: argparse.Namespace) -> int:
             seconds=args.seconds,
             caller_supplied_p_hat=p_hat,
             entry_remain_seconds=parse_entry_remain_seconds(args.entry_remain_seconds),
-            move_threshold_pct=args.move_threshold_pct,
+            move_threshold_pct=float(move_threshold_pct),
             observe_start_remaining_seconds=args.observe_start_remaining_seconds,
         )
         print(json.dumps({"output": str(args.output)}, sort_keys=True))
         return 0
 
-    required = {
-        "--polymarket-asset-id": args.polymarket_asset_id,
-        "--open-price": args.open_price,
-        "--market-end-time": args.market_end_time,
-        "--stake": args.stake,
-        "--output": args.output,
-    }
-    missing = [name for name, value in required.items() if value is None]
-    if missing:
-        raise SystemExit(f"missing required args: {', '.join(missing)}")
-
-    args.output.write_text("", encoding="utf-8")
-    await run_once(
-        asset_id=args.polymarket_asset_id,
-        open_price=args.open_price,
-        market_end_time=parse_datetime(args.market_end_time),
-        stake=args.stake,
-        output=args.output,
-        seconds=args.seconds,
-        caller_supplied_p_hat=args.p_hat,
-        observe_start_remaining_seconds=args.observe_start_remaining_seconds,
-    )
-    print(json.dumps({"output": str(args.output)}, sort_keys=True))
-    return 0
+    raise SystemExit("missing required args: --session-config")
 
 
 def main() -> int:

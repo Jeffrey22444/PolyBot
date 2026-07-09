@@ -35,7 +35,7 @@ The bot watches a BTC 15-minute Up/Down Polymarket session. It records the BTC
 price at market open. When the market enters the final configurable observation
 window, defaulting to the last 300 seconds, it continuously observes BTC price
 movement from that open price. If the absolute move reaches the configured
-threshold, defaulting to `0.05%`, the bot creates one directional signal in the
+threshold, defaulting to `0.15%`, the bot creates one directional signal in the
 same direction as the move. After a signal exists, it checks whether the matching
 UP or DOWN token is tradable at real ask-side depth with the fixed paper stake.
 An optional `p_hat` marketability filter may reject trades whose executable ask
@@ -52,11 +52,12 @@ decisions. They are intended to be configurable through the active YAML task.
 | Market type | BTC Up/Down | Only BTC binary direction markets are in scope. |
 | Market duration | 15 minutes | The root strategy is calibrated around 15-minute sessions. |
 | Observation window start | `300` seconds remaining | Start continuous signal observation when the market has 5 minutes left. |
-| Move threshold | `0.05%` | BTC must move at least this far from market open to create a signal. |
+| Move threshold | `0.15%` | BTC must move at least this far from market open to create a signal. |
 | Max entries per market | `1` | The first valid threshold crossing can create one paper entry. |
-| Paper stake | `9` USDC-equivalent | Fixed simulated spend per accepted paper trade. |
-| `p_hat` filter | enabled | Optional marketability filter, not part of the root signal. |
-| `p_hat` value | `0.55` | Caller-supplied win-probability input when the filter is enabled. |
+| Paper stake | `5%` of settled simulated equity | Default simulated spend per accepted paper trade; with initial equity `1000`, the first stake is `50`. |
+| Manual paper stake override | unset | `--paper-stake` can pin a fixed simulated spend for a run. |
+| `p_hat` filter | disabled | Optional marketability filter, not part of the root signal. |
+| `p_hat` value | `0.55` | Caller-supplied win-probability input only when the filter is enabled. |
 | Open-price capture window | `8` seconds | Time budget to capture BTC trades around market open. |
 | Max open-price delay | `5` seconds | The open price must be fresh enough after market start. |
 | Observation tick | `1` second | Intended cadence for checking threshold crossing inside the window. |
@@ -182,6 +183,12 @@ missing or non-positive `p_hat` edge.
 Kelly may be recorded as a reference value when `p_hat` is enabled, but it does
 not size the current paper stake.
 
+By default, the current paper stake is `current settled simulated equity *
+paper.stake_fraction`. Settled equity is `paper.initial_bankroll` plus
+cumulative PnL from `WIN` and `LOSS` ledger rows only; `PENDING`, `SKIPPED`, and
+`NO_TRADE` rows do not change equity. A manual `--paper-stake` value overrides
+that fraction for the run.
+
 ### 9. Resolve And Score Paper Results
 
 When public Polymarket metadata later shows an unambiguous binary result, the
@@ -200,6 +207,13 @@ If public resolution is ambiguous, disputed, not closed, non-binary, or missing
 clean terminal prices, the bot records a skip reason instead of inferring the
 winner.
 
+Existing ledger rows with result `PENDING` are retried when a paper run starts,
+after each session, and during final/interrupted run close. The retry path uses
+public market metadata by `market_id` and the same conservative resolution logic
+above. If the public metadata is still unclear, the ledger row remains
+`PENDING`; the bot does not infer settlement from frontend display text or BTC
+close movement.
+
 ## Minimal Review Ledger
 
 The local paper system should keep one minimal record per 15-minute market so a
@@ -217,9 +231,9 @@ The ledger should support these questions without storing raw market noise:
 The ledger should not store raw WebSocket ticks, full order books, full public
 payloads, or UI-oriented details.
 
-The simulated bankroll is accounting-only. It must not change signal generation,
-stake sizing, marketability, or paper fill behavior unless Planning explicitly
-approves a sizing rule later.
+The simulated bankroll is accounting-only. It must not change signal
+generation, marketability, or paper fill behavior. Its current approved sizing
+use is only the default `paper.stake_fraction` calculation described above.
 
 ## What The Strategy Does Not Do
 

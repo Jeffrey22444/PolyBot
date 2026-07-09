@@ -115,6 +115,14 @@ def stats(path: Path, initial_bankroll: float) -> dict[str, Any]:
     }
 
 
+def current_equity(path: Path, initial_bankroll: float) -> float:
+    return float(stats(path, initial_bankroll)["equity_after"])
+
+
+def equity_fraction_stake(path: Path, initial_bankroll: float, stake_fraction: float) -> float:
+    return current_equity(path, initial_bankroll) * stake_fraction
+
+
 def record_result(
     path: Path,
     market_id: str,
@@ -167,6 +175,8 @@ def self_check() -> dict[str, Any]:
     assert final["settled_count"] == 2
     assert round(final["win_rate"], 6) == 50.0
     assert round(final["cumulative_pnl"], 6) == -7.29
+    assert round(current_equity(path, initial), 6) == round(final["equity_after"], 6)
+    assert round(equity_fraction_stake(path, initial, 0.05), 6) == round(final["equity_after"] * 0.05, 6)
     raw_names = {item[1] for item in sqlite3.connect(path).execute("PRAGMA table_info(paper_trades)").fetchall()}
     assert not {"raw_orderbook", "raw_tick", "raw_payload", "token_id"} & raw_names
     return {"path": str(path), "stats": final, "rows": all_rows}
