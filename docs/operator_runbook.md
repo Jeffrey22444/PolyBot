@@ -42,16 +42,17 @@ Notes:
 - `runs/` is ignored by Git, so local artifacts stay out of commits by default.
 
 During a run, Terminal stdout prints concise operator briefs with Beijing-time
-prefixes. Full CLI output, including machine JSON and diagnostics, is still
-kept in `runs/paper-btc-15m-logs/`.
+prefixes and ET 15m market windows. Full CLI output, including machine JSON,
+raw Chainlink payloads, and diagnostics, is still kept in
+`runs/paper-btc-15m-logs/`.
 
 ```text
-[2026-07-09 17:55:00 CST] [RUN] stake=equity*0.05 p_hat_filter=False
-[2026-07-09 17:55:02 CST] [WATCH] 2026-07-09 18:00-18:15 CST
-[2026-07-09 18:10:02 CST] [BET] DOWN stake=50.00 avg=0.82 shares=60.98 move=-0.31%
-[2026-07-09 18:15:01 CST] [SETTLED] DOWN WIN pnl=+10.98 equity=1010.98
-[2026-07-09 18:30:01 CST] [PENDING] awaiting_public_resolution
-[2026-07-09 18:45:01 CST] [NO_BET] no_signal move=0.08%
+[2026-07-09 15:29:58 CST] [WATCH] 03:30-03:45 ET
+[2026-07-09 15:30:01 CST] [OPEN] 03:30-03:45 ET price=62863.06 source=polymarket_chainlink
+[2026-07-09 15:40:18 CST] [BET] DOWN move=-0.158% remaining=4.7m avg=0.95 stake=50.68
+[2026-07-09 15:45:01 CST] [SETTLED] LOSS pnl=-50.68
+[2026-07-09 16:00:01 CST] [PENDING] awaiting settlement
+[2026-07-09 16:15:01 CST] [NO_BET] no trigger; next market
 ```
 
 Terminal output intentionally avoids `market_id`, raw orderbook payloads, raw
@@ -140,10 +141,12 @@ Ledger notes:
 - `stake_fraction` defaults to `0.05`; only settled `WIN` and `LOSS` PnL
   changes simulated equity for the next default stake. `PENDING`, `SKIPPED`,
   and `NO_TRADE` rows do not change equity.
-- If Polymarket public metadata provides an open/reference price, the ledger
-  records `open_price_source=polymarket:<field>`. Otherwise the existing BTC
-  capture path is used and recorded as
-  `open_price_source=binance_btcusdt_fallback`.
+- Signal open and current prices must come from the Polymarket frontend
+  Chainlink candle surface. Accepted paper entries should record
+  `open_price_source=polymarket_chainlink`.
+- Binance BTC captures may remain in full logs as debug context only. A
+  fallback-only/Binance-only price path is skipped and must not create a signal
+  or paper entry.
 - `p_hat` remains caller-supplied. It is not a model, training output, or
   inferred estimate.
 

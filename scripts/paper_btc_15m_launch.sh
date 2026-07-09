@@ -32,7 +32,7 @@ while true; do
       {
         print >> logfile
         fflush(logfile)
-        if ($0 ~ /^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} CST\] \[(START|RETRY|STOP|RUN|WATCH|BET|NO_BET|SETTLED|PENDING)\]/) {
+        if ($0 ~ /^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} CST\] \[(START|RETRY|STOP|WATCH|OPEN|BET|NO_BET|SETTLED|PENDING)\]/) {
           print
           fflush()
         }

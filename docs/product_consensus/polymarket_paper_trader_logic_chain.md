@@ -31,16 +31,17 @@ row per market, not only end-of-run artifacts.
 
 ## Current Strategy In One Paragraph
 
-The bot watches a BTC 15-minute Up/Down Polymarket session. It records the BTC
-price at market open. When the market enters the final configurable observation
-window, defaulting to the last 300 seconds, it continuously observes BTC price
-movement from that open price. If the absolute move reaches the configured
-threshold, defaulting to `0.15%`, the bot creates one directional signal in the
-same direction as the move. After a signal exists, it checks whether the matching
-UP or DOWN token is tradable at real ask-side depth with the fixed paper stake.
-An optional `p_hat` marketability filter may reject trades whose executable ask
-price is too expensive. The bot then records the paper trade or skip reason and
-later scores the paper result from public resolution data when available.
+The bot watches a BTC 15-minute Up/Down Polymarket session. It records the
+Polymarket/Chainlink-aligned BTC reference price at market open. When the market
+enters the final configurable observation window, defaulting to the last 300
+seconds, it continuously observes BTC movement using the same aligned price
+source. If the absolute move reaches the configured threshold, defaulting to
+`0.15%`, the bot creates one directional signal in the same direction as the
+move. After a signal exists, it checks whether the matching UP or DOWN token is
+tradable at real ask-side depth with the fixed paper stake. An optional `p_hat`
+marketability filter may reject trades whose executable ask price is too
+expensive. The bot then records the paper trade or skip reason and later scores
+the paper result from public resolution data when available.
 
 ## Current Parameters
 
@@ -54,6 +55,7 @@ decisions. They are intended to be configurable through the active YAML task.
 | Observation window start | `300` seconds remaining | Start continuous signal observation when the market has 5 minutes left. |
 | Move threshold | `0.15%` | BTC must move at least this far from market open to create a signal. |
 | Max entries per market | `1` | The first valid threshold crossing can create one paper entry. |
+| Signal price source | Polymarket/Chainlink-aligned | Open and observed current price must match the market's Chainlink resolution basis. |
 | Paper stake | `5%` of settled simulated equity | Default simulated spend per accepted paper trade; with initial equity `1000`, the first stake is `50`. |
 | Manual paper stake override | unset | `--paper-stake` can pin a fixed simulated spend for a run. |
 | `p_hat` filter | disabled | Optional marketability filter, not part of the root signal. |
@@ -82,18 +84,26 @@ does not guess.
 
 ### 2. Record The BTC Open Price
 
-At the selected market's start time, the bot should use a Polymarket-aligned
-open/reference price when that public source is available.
+At the selected market's start time, the bot must use a
+Polymarket/Chainlink-aligned open/reference price. For BTC 15-minute markets,
+the currently confirmed public source is the Polymarket frontend Chainlink
+surface, including:
 
-If a Polymarket-aligned open/reference price is not available from public data,
-the bot may use a clearly labeled fallback source. The fallback source must be
-recorded; it must not be presented as a Polymarket open price. Every later
-signal compares against the recorded open price and its source.
+```text
+https://polymarket.com/api/crypto/crypto-price
+https://polymarket.com/api/chainlink-candles
+```
+
+If a Polymarket/Chainlink-aligned open price is not available, the market must
+be skipped. Binance or other spot-exchange prices may be recorded for debugging
+only; they must not trigger a signal or paper entry for Chainlink-resolved
+markets.
 
 ### 3. Start The Observation Window
 
 The strategy observes continuously during the final configurable window of the
-15-minute market. The current default is:
+15-minute market, using the same Polymarket/Chainlink-aligned price family as
+the recorded open price. The current default is:
 
 ```text
 observe_start_remaining_seconds = 300

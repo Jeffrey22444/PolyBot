@@ -2,13 +2,94 @@
 
 ## Current Summary
 
-- Current phase: pending resolution retry and 5% equity stake remediation complete; ready for separate `验收区` if requested
-- Current recommended next task: review `polybot-paper-pending-resolution-retry-and-equity-stake`
+- Current phase: Polymarket/Chainlink price-source alignment execution complete; ready for `验收区`
+- Current recommended next task: review `polybot-paper-chainlink-price-alignment-terminal-output`
 - Latest accepted slice: Beijing-day rolling paper run and per-session settlement
-- Open blockers: none for planning; final `p_hat` model and live trading remain explicit future product decisions outside this config/operator UX task
+- Open blockers: none for execution; if public Polymarket frontend Chainlink endpoints become unavailable, route back to planning before adding Chainlink credentials
 - Last updated: 2026-07-09
 
 ## Log
+
+### 2026-07-09 - Polymarket/Chainlink Price Alignment Executed
+
+任务ID：
+polybot-paper-chainlink-price-alignment-terminal-output
+
+改动文件：
+- Updated `polybot/open_price.py`
+- Updated `polybot/paper_runner.py`
+- Updated `polybot/e2e_dry_run.py`
+- Updated `scripts/paper_btc_15m_launch.sh`
+- Updated `docs/operator_runbook.md`
+- Updated `docs/local_process_supervision.md`
+- Updated `docs/project_notes/issues.md`
+
+范围边界：
+- Added Polymarket frontend Chainlink candle alignment for BTC 15m signal open/current prices.
+- `open_price_source` for aligned paper entries is now `polymarket_chainlink`.
+- `binance_btcusdt_fallback` can still be captured into full logs/raw artifacts for debugging, but fallback-only/Binance-only price input is skipped and cannot create a signal or paper entry.
+- Terminal output now uses concise ET market windows and key lines: `[WATCH]`, `[OPEN]`, `[BET]`, `[NO_BET]`, `[SETTLED]`, `[PENDING]`.
+- Launcher Terminal whitelist now passes `[OPEN]` and no longer passes old `[RUN]`.
+- Full stdout/stderr logs and raw artifacts remain under `runs/paper-btc-15m-logs/` and `runs/paper-btc-15m/<Beijing YYYY-MM-DD>/`.
+- Did not change move threshold, observation window, market selection, paper stake sizing, PnL formula, pending retry behavior, resolution conservatism, ledger schema, or live-order boundaries.
+
+运行命令：
+- `python3 -m polybot.e2e_dry_run --self-check`
+- `python3 -m polybot.e2e_dry_run --help`
+- `bash -n scripts/paper_btc_15m_launch.sh`
+- `PYTHONPYCACHEPREFIX=/private/tmp/polybot-pycache python3 -m compileall -q polybot`
+- `git diff --check`
+- `python3 -m polybot.open_price --self-check`
+- `python3 -m polybot.paper_runner --self-check`
+- `rg -n "\\[OPEN\\]|polymarket_chainlink|binance_btcusdt_fallback_not_allowed_for_signal|btc-updown-15m-1783582200|62863\\.06311005423|62820\\.69|no trigger; next market|awaiting settlement" polybot/open_price.py polybot/paper_runner.py polybot/e2e_dry_run.py scripts/paper_btc_15m_launch.sh docs/operator_runbook.md docs/local_process_supervision.md`
+- `git diff -- polybot/open_price.py polybot/paper_runner.py polybot/e2e_dry_run.py scripts/paper_btc_15m_launch.sh docs/operator_runbook.md docs/local_process_supervision.md | rg -n "CREATE TABLE|ALTER TABLE|wallet|signing|order placement|live order|cloud deployment|root/system|LaunchDaemon|machine restart|pending_ledger_resolution_retry\\("`
+
+结果：
+- Required e2e self-check, help, launcher syntax, compileall, and whitespace checks passed.
+- Supplemental `open_price` and `paper_runner` self-checks passed.
+- e2e self-check now covers `btc-updown-15m-1783582200`: Chainlink open `62863.06311005423` and current `62820.69` produce move about `-0.0674%`, so `0.15%` DOWN does not trigger.
+- e2e self-check now asserts fallback-only/Binance-only price input is skipped, returns no `signal_record`, and cannot create a paper entry.
+- concise Terminal self-check covers watch/open/bet/no-bet/settled/pending and asserts no `market_id=`, long `btc-updown-15m-...` slug, URL, or JSON appears in those lines.
+- Targeted search confirmed the new Chainlink source, fallback-block skip reason, Terminal `[OPEN]`, and fixture evidence are present.
+- Forbidden diff search returned no matches for schema changes, live trading, wallet/signing, cloud/root/system deployment, machine restart policy, or pending retry changes.
+
+手工检查：
+- `polybot.open_price.enrich_session_config(...)` now prefers `/api/chainlink-candles` and only returns captured open/current when the candle matches the market's 15m window.
+- `polybot.paper_runner.latest_btc_price(...)` ignores non-`polymarket_chainlink` BTC records, preventing Binance records from entering signal generation.
+- `polybot.e2e_dry_run.process_session(...)` writes raw Chainlink payload artifacts and passes aligned current-price records into the runner on observation ticks.
+- `scripts/paper_btc_15m_launch.sh` still writes the full stream to the log file before filtering Terminal output.
+
+范围外未做：
+- No Chainlink credential path, no historical PnL recalculation, no ledger/artifact deletion, no new dependency, no new process manager, no UI, and no live order path.
+
+阻塞/待规划决定：
+- None.
+
+### 2026-07-09 - Polymarket/Chainlink Price Alignment Planned
+
+任务ID：
+polybot-paper-chainlink-price-alignment-terminal-output
+
+规划结论：
+- BTC 15m signal open/current price must align with the Polymarket page and Chainlink resolution basis.
+- `binance_btcusdt_fallback` may remain as a debug artifact only; it must not trigger a signal or paper entry for Chainlink-resolved markets.
+- Terminal output should be concise and continuous by ET 15m window: watch, open price, no-bet or bet trigger with move/remain, then settlement or pending.
+
+已验证公开源：
+- `https://polymarket.com/api/crypto/crypto-price`
+- `https://polymarket.com/api/chainlink-candles`
+
+关键证据：
+- For `btc-updown-15m-1783582200`, Polymarket frontend Chainlink data returned `openPrice=62863.06311005423` and `closePrice=62987.80829930613`.
+- The same market's old Binance fallback open was `62920.01`, causing the observed false DOWN trigger under the current bot logic.
+
+交付：
+- Updated `docs/product_consensus/polymarket_paper_trader_logic_chain.md`
+- Overwrote `docs/project_notes/current_task.md` with the execution card and Acceptance Contract for this task.
+
+范围外：
+- No runtime code was changed in planning.
+- No historical ledger rows were recalculated or deleted.
 
 ### 2026-07-09 - Move Threshold Raised To 0.15 Percent
 

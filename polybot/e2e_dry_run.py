@@ -11,12 +11,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from polybot.long_run import run_long_run
 from polybot.market_data import CaptureRecord, capture_btc_reference, write_jsonl
 from polybot.market_discovery import GAMMA_EVENTS_URL
 from polybot.market_discovery import discover_session, fetch_json, select_session
-from polybot.open_price import enrich_session_config
+from polybot.open_price import POLYMARKET_CHAINLINK_SOURCE, chainlink_price_record, enrich_session_config
 from polybot.paper_runner import parse_datetime, run_session_once
 from polybot.resolution_ingestion import GAMMA_MARKETS_URL, extract_market, ingest_metadata
 from polybot.runtime_config import configured_move_threshold_pct
@@ -27,6 +28,7 @@ from polybot.trade_ledger import DEFAULT_LEDGER_PATH, equity_fraction_stake, rec
 
 
 BEIJING_TZ = timezone(timedelta(hours=8), "CST")
+ET_TZ = ZoneInfo("America/New_York")
 BEIJING_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -480,7 +482,14 @@ def fmt_amount(value: Any) -> str:
 
 def fmt_pct(value: Any) -> str:
     try:
-        return f"{float(value):.2f}%"
+        return f"{float(value):.3f}%"
+    except (TypeError, ValueError):
+        return "None"
+
+
+def fmt_minutes(value: Any) -> str:
+    try:
+        return f"{float(value) / 60:.1f}m"
     except (TypeError, ValueError):
         return "None"
 
@@ -505,34 +514,40 @@ def operator_time(value: Any) -> str:
 
 def session_window_text(session: dict[str, Any]) -> str:
     try:
-        start = parse_datetime(str(session.get("market_start_time"))).astimezone(BEIJING_TZ)
-        end = parse_datetime(str(session.get("market_end_time"))).astimezone(BEIJING_TZ)
+        start = parse_datetime(str(session.get("market_start_time"))).astimezone(ET_TZ)
+        end = parse_datetime(str(session.get("market_end_time"))).astimezone(ET_TZ)
     except (TypeError, ValueError):
         return "unknown_window"
     if start.date() == end.date():
-        return f"{start:%Y-%m-%d %H:%M}-{end:%H:%M %Z}"
-    return f"{start:%Y-%m-%d %H:%M}-{end:%Y-%m-%d %H:%M %Z}"
+        return f"{start:%H:%M}-{end:%H:%M} ET"
+    return f"{start:%Y-%m-%d %H:%M}-{end:%Y-%m-%d %H:%M} ET"
 
 
 def watch_line(session: dict[str, Any]) -> str:
     return f"[WATCH] {session_window_text(session)}"
 
 
-def bet_line(side: Any, stake: Any, avg: Any, shares: Any, move: Any) -> str:
-    return f"[BET] {fmt(side)} stake={fmt_amount(stake)} avg={fmt_amount(avg)} shares={fmt_amount(shares)} move={fmt_pct(move)}"
+def open_line(session: dict[str, Any], price: Any, source: Any) -> str:
+    return f"[OPEN] {session_window_text(session)} price={fmt_amount(price)} source={fmt(source)}"
+
+
+def bet_line(side: Any, move: Any, remaining_seconds: Any, avg: Any, stake: Any) -> str:
+    return f"[BET] {fmt(side)} move={fmt_pct(move)} remaining={fmt_minutes(remaining_seconds)} avg={fmt_amount(avg)} stake={fmt_amount(stake)}"
 
 
 def no_bet_line(reason: Any, move: Any = None) -> str:
+    if reason in ("no_signal", "observation_window_no_signal"):
+        return "[NO_BET] no trigger; next market"
     suffix = "" if move is None else f" move={fmt_pct(move)}"
     return f"[NO_BET] {fmt(reason)}{suffix}"
 
 
 def settled_line(side: Any, result: str, pnl: Any, equity: Any) -> str:
-    return f"[SETTLED] {fmt(side)} {result} pnl={fmt_money(pnl)} equity={fmt_amount(equity)}"
+    return f"[SETTLED] {result} pnl={fmt_money(pnl)}"
 
 
 def pending_line(reason: Any) -> str:
-    return f"[PENDING] {fmt(reason or 'awaiting_public_resolution')}"
+    return "[PENDING] awaiting settlement"
 
 
 def market_slug(session: dict[str, Any]) -> str:
@@ -633,6 +648,8 @@ async def process_session(
         session_report["steps"].append({"step": "btc_reference_capture", "status": "blocker", "reason": f"{type(exc).__name__}: {exc}"})
 
     enriched = enrich_session_config({"selection": session}, btc_records, args.max_open_price_delay_seconds)
+    if enriched.get("raw_payload") is not None:
+        write_json(source_dir / f"chainlink_reference_{index}.json", {"payload": enriched["raw_payload"]})
     if enriched.get("skip_reason"):
         reason = enriched["skip_reason"]
         session_report["steps"].append({"step": "open_price", "status": "skipped", "reason": reason})
@@ -652,6 +669,7 @@ async def process_session(
             open_price_source=enriched_session.get("open_price_source"),
         )
     session_report["steps"].append({"step": "open_price", "status": "captured", "open_price": enriched_session["open_price"], "open_price_timestamp": enriched_session["open_price_timestamp"]})
+    operator_print(args, open_line(enriched_session, enriched_session["open_price"], enriched_session["open_price_source"]))
     runner_output = source_dir / f"runner_{index}.jsonl"
     runner_output.write_text("", encoding="utf-8")
     session_report["runner_output"] = str(runner_output)
@@ -677,6 +695,25 @@ async def process_session(
     try:
         while datetime.now(timezone.utc) <= end:
             runner_now = datetime.now(timezone.utc)
+            current = enrich_session_config({"selection": enriched_session}, [], args.max_open_price_delay_seconds)
+            if current.get("raw_payload") is not None:
+                write_json(source_dir / f"chainlink_reference_{index}_{observation_checks + 1}.json", {"payload": current["raw_payload"]})
+            if current.get("skip_reason"):
+                reason = current["skip_reason"]
+                append_jsonl(supervisor_jsonl, {"record_type": "session_runner_skipped", "session": meta, "runner_output": str(runner_output), "skip_reason": reason})
+                session_report["steps"].append({"step": "paper_runner", "status": "skipped", "runner_output": str(runner_output), "reason": reason, "observation_checks": observation_checks})
+                session_report.update({"status": "skipped", "skip_reason": reason})
+                if market_id:
+                    record_result(args.ledger_path, market_id, "SKIPPED", args.initial_bankroll, skip_reason=reason)
+                operator_print(args, no_bet_line(reason))
+                return session_report
+            current_selection = current["selection"]
+            current_records = [
+                chainlink_price_record(
+                    float(current_selection["current_price"]),
+                    str(current_selection["current_price_timestamp"]),
+                )
+            ]
             result = await run_session_once(
                 session=enriched_session,
                 open_price=float(enriched_session["open_price"]),
@@ -690,6 +727,7 @@ async def process_session(
                 p_hat_filter_enabled=args.p_hat_filter_enabled,
                 btc_seconds=args.observation_tick_seconds,
                 market_seconds=args.runner_seconds,
+                btc_records=current_records,
             )
             observation_checks += 1
             signal_record = result.get("signal_record")
@@ -721,7 +759,7 @@ async def process_session(
             if result["status"] == "paper_opened":
                 operator_print(
                     args,
-                    bet_line(decision.signal.value, decision.stake, decision.executable_avg_ask, decision.shares, signal_record.ret_pct if signal_record else None),
+                    bet_line(decision.signal.value, signal_record.ret_pct if signal_record else None, signal_record.remaining_seconds if signal_record else None, decision.executable_avg_ask, decision.stake),
                 )
             else:
                 if market_id:
@@ -874,11 +912,6 @@ def finalize_run(
 async def run_dry_run(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = resolve_run_dir(args.run_dir, parse_datetime(args.now) if args.now else None)
     daily_base = run_dir.parent if is_daily_run_dir(run_dir) else None
-    stake_text = args.paper_stake if args.paper_stake is not None else f"equity*{args.stake_fraction}"
-    operator_print(
-        args,
-        f"[RUN] stake={fmt_amount(stake_text) if args.paper_stake is not None else stake_text} p_hat_filter={args.p_hat_filter_enabled}",
-    )
     report, source_dir, supervisor_jsonl = start_run_report(args, run_dir)
 
     payload, source_timestamp, data_source = load_public_payload(args)
@@ -1028,18 +1061,101 @@ def self_check() -> Path:
     assert next_beijing_midnight(datetime(2026, 7, 8, 15, 59, tzinfo=timezone.utc)) == datetime(2026, 7, 8, 16, 0, tzinfo=timezone.utc)
     concise_lines = [
         watch_line({"market_start_time": "2026-07-09T10:00:00+00:00", "market_end_time": "2026-07-09T10:15:00+00:00", "market_id": "hidden"}),
-        bet_line("DOWN", 50, 0.82, 60.98, -0.31),
+        open_line({"market_start_time": "2026-07-09T10:00:00+00:00", "market_end_time": "2026-07-09T10:15:00+00:00"}, 62863.06311005423, POLYMARKET_CHAINLINK_SOURCE),
+        bet_line("DOWN", -0.158, 282, 0.95, 50.68),
         no_bet_line("no_signal", 0.08),
         settled_line("DOWN", "WIN", 10.98, 1010.98),
         pending_line("awaiting_public_resolution"),
     ]
-    assert concise_lines[0] == "[WATCH] 2026-07-09 18:00-18:15 CST"
-    assert concise_lines[1] == "[BET] DOWN stake=50.00 avg=0.82 shares=60.98 move=-0.31%"
-    assert concise_lines[2] == "[NO_BET] no_signal move=0.08%"
-    assert concise_lines[3] == "[SETTLED] DOWN WIN pnl=+10.98 equity=1010.98"
-    assert concise_lines[4] == "[PENDING] awaiting_public_resolution"
+    assert concise_lines[0] == "[WATCH] 06:00-06:15 ET"
+    assert concise_lines[1] == "[OPEN] 06:00-06:15 ET price=62863.06 source=polymarket_chainlink"
+    assert concise_lines[2] == "[BET] DOWN move=-0.158% remaining=4.7m avg=0.95 stake=50.68"
+    assert concise_lines[3] == "[NO_BET] no trigger; next market"
+    assert concise_lines[4] == "[SETTLED] WIN pnl=+10.98"
+    assert concise_lines[5] == "[PENDING] awaiting settlement"
     assert all("market_id=" not in line for line in concise_lines)
+    assert all("btc-updown-15m-" not in line and "http" not in line and "{" not in line for line in concise_lines)
     assert current_report_market_ids({"sessions": [{"session": {"market_id": "fresh"}}, {"session": {"market_id": ""}}, {}]}) == {"fresh"}
+
+    chainlink_start = datetime.fromtimestamp(1783582200, tz=timezone.utc)
+    chainlink_session = {
+        "market_id": "btc-updown-15m-1783582200",
+        "market_slug": "btc-updown-15m-1783582200",
+        "market_start_time": chainlink_start.isoformat(),
+        "market_end_time": (chainlink_start + timedelta(minutes=15)).isoformat(),
+        "up_token_id": "up-chainlink",
+        "down_token_id": "down-chainlink",
+        "selected_side_labels": {"UP": "Up", "DOWN": "Down"},
+    }
+
+    def fake_chainlink_fetch(_url: str) -> tuple[dict[str, Any], str]:
+        return {"candles": [{"time": 1783582200, "open": 62863.06311005423, "high": 62900, "low": 62800, "close": 62820.69}]}, "fixture-chainlink"
+
+    aligned = enrich_session_config({"selection": chainlink_session}, [], 5, fake_chainlink_fetch)
+    assert aligned["skip_reason"] is None
+    aligned_session = aligned["selection"]
+    assert aligned_session["open_price"] == 62863.06311005423
+    assert aligned_session["open_price_source"] == POLYMARKET_CHAINLINK_SOURCE
+    aligned_runner = asyncio.run(
+        run_session_once(
+            session=aligned_session,
+            open_price=float(aligned_session["open_price"]),
+            stake=50.0,
+            output=run_dir / "_source" / "chainlink_fixture_runner.jsonl",
+            seconds=1.0,
+            caller_supplied_p_hat=None,
+            market_records=[],
+            btc_records=[chainlink_price_record(float(aligned_session["current_price"]), str(aligned_session["current_price_timestamp"]))],
+            now=parse_datetime(aligned_session["market_end_time"]) - timedelta(seconds=282),
+            move_threshold_pct=0.15,
+            p_hat_filter_enabled=False,
+        )
+    )
+    assert aligned_runner["status"] == "no_signal"
+    assert round(aligned_runner["signal_record"].ret_pct, 4) == -0.0674
+    assert aligned_runner["signal_record"].signal == Signal.NO_SIGNAL
+
+    fallback_only = enrich_session_config(
+        {"selection": chainlink_session},
+        [
+            CaptureRecord(
+                source="binance_btcusdt_trade",
+                event_type="trade",
+                source_timestamp_ms=1783582200000,
+                local_receive_timestamp=chainlink_start.isoformat(),
+                payload={"p": "62920.01"},
+            )
+        ],
+        5,
+        lambda _url: ({"candles": []}, "fixture-empty"),
+    )
+    assert fallback_only["skip_reason"] == "binance_btcusdt_fallback_not_allowed_for_signal"
+    fallback_runner = asyncio.run(
+        run_session_once(
+            session=chainlink_session,
+            open_price=62920.01,
+            stake=50.0,
+            output=run_dir / "_source" / "fallback_fixture_runner.jsonl",
+            seconds=1.0,
+            caller_supplied_p_hat=None,
+            market_records=[],
+            btc_records=[
+                CaptureRecord(
+                    source="binance_btcusdt_trade",
+                    event_type="trade",
+                    source_timestamp_ms=1783582200000,
+                    local_receive_timestamp=chainlink_start.isoformat(),
+                    payload={"p": "62820.69"},
+                )
+            ],
+            now=parse_datetime(chainlink_session["market_end_time"]) - timedelta(seconds=282),
+            move_threshold_pct=0.15,
+            p_hat_filter_enabled=False,
+        )
+    )
+    assert fallback_runner["status"] == "skipped"
+    assert fallback_runner["reason"] == "missing_btc_reference_price"
+    assert fallback_runner.get("signal_record") is None
     wait_step = asyncio.run(wait_to_open({"market_start_time": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()}, 0.0))
     assert wait_step["reason"] == "wait_to_open_budget_exceeded"
     config_root = Path(tempfile.mkdtemp(prefix="polybot_config_self_check_"))
@@ -1183,7 +1299,8 @@ def self_check() -> Path:
     assert len(ledger) == 2
     assert {row["market_id"] for row in ledger} == {"market-next-one", "market-next-two"}
     assert {row["result"] for row in ledger} == {"SKIPPED"}
-    assert {row["skip_reason"] for row in ledger} == {"no_post_start_record"}
+    assert all(row["side"] is None for row in ledger)
+    assert all(row["skip_reason"] for row in ledger)
 
     close_root = Path(tempfile.mkdtemp(prefix="polybot_phase20_resolution_self_check_"))
     close_source = close_root / "run" / "_source"

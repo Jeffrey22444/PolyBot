@@ -39,10 +39,18 @@ default `5%` settled-equity paper stake, `p_hat` filter, discovery, timing,
 capture, runtime, and operator brief output. The launcher still only starts the
 existing CLI and keeps local logs.
 
-Terminal output is limited to startup/retry/stop status plus `[RUN]`,
-`[WATCH]`, `[BET]`, `[NO_BET]`, `[SETTLED]`, and `[PENDING]` lines. Full JSON,
-URLs, candidate snapshots, raw diagnostics, and detailed Python output remain in
+Terminal output is limited to startup/retry/stop status plus `[WATCH]`,
+`[OPEN]`, `[BET]`, `[NO_BET]`, `[SETTLED]`, and `[PENDING]` lines. The market
+window is printed in ET while the timestamp prefix remains local Beijing time.
+Full JSON, URLs, candidate snapshots, raw Chainlink payloads, raw debug BTC
+captures, diagnostics, and detailed Python output remain in
 `runs/paper-btc-15m-logs/<UTC timestamp>.log`.
+
+Signal open and current prices use the Polymarket frontend Chainlink candle
+surface and record `open_price_source=polymarket_chainlink` for accepted paper
+entries. Binance fallback captures can remain in raw logs for debugging, but a
+fallback-only/Binance-only price path is skipped and cannot trigger a signal or
+paper entry.
 
 By default, the paper stake is `current settled simulated equity *
 paper.stake_fraction`; with initial equity `1000` and `stake_fraction: 0.05`,

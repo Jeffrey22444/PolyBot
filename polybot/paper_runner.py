@@ -13,6 +13,7 @@ from typing import Any
 from polybot.market_data import CaptureRecord, capture_btc_reference, capture_polymarket_market
 from polybot.marketability import evaluate_marketability
 from polybot.market_discovery import sample_payload, select_session
+from polybot.open_price import POLYMARKET_CHAINLINK_SOURCE
 from polybot.paper import PaperTradeRecord, SkippedTradeRecord
 from polybot.runtime_config import configured_move_threshold_pct
 from polybot.signal import Signal, build_signal_record
@@ -52,6 +53,8 @@ def append_jsonl(path: Path, record_type: str, payload: dict[str, Any]) -> None:
 
 def latest_btc_price(records: list[CaptureRecord]) -> float | None:
     for record in reversed(records):
+        if record.source != POLYMARKET_CHAINLINK_SOURCE:
+            continue
         price = record.payload.get("p")
         if price is not None:
             return float(price)
@@ -220,11 +223,11 @@ def sample_btc_records() -> list[CaptureRecord]:
 def sample_btc_records_with_price(price: str) -> list[CaptureRecord]:
     return [
         CaptureRecord(
-            source="binance_btcusdt_trade",
-            event_type="trade",
+            source=POLYMARKET_CHAINLINK_SOURCE,
+            event_type="chainlink_candle",
             source_timestamp_ms=1783327175287,
             local_receive_timestamp="2026-07-06T08:39:35.291306+00:00",
-            payload={"e": "trade", "E": 1783327175287, "p": price},
+            payload={"p": price},
         )
     ]
 
