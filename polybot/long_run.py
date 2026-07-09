@@ -301,13 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sessions", type=int, default=1)
     parser.add_argument("--max-runtime-seconds", type=float)
     parser.add_argument("--end-time")
-    parser.add_argument("--continuous", action="store_true")
     parser.add_argument("--heartbeat-interval-seconds", type=float, default=30.0)
     parser.add_argument("--retry-limit", type=int, default=1)
     parser.add_argument("--retry-backoff-seconds", type=float, default=1.0)
     parser.add_argument("--stop-after-sessions", type=int)
-    parser.add_argument("--lookahead-minutes", type=int, default=30)
-    parser.add_argument("--runner-seconds", type=float, default=10.0)
     return parser
 
 
